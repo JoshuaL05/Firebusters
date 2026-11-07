@@ -3,12 +3,11 @@ motion.py - talks to the ESP32 over USB serial.
 
 Pi -> ESP32 (one command per line):
     PING                 -> PONG
-    HOME                 -> OK HOME   (then telemetry shows homed=1 when done)
-    MOVE <mm>            -> OK MOVE   (rail; telemetry shows moving until it arrives)
-    AIM <pan> <tilt>     -> OK AIM
+    HOME                 -> OK HOME   (then telemetry shows homed=1 when both axes are done)
+    MOVE <x_mm> <y_mm>   -> OK MOVE   (telemetry shows moving=1 until it arrives)
     SPRAY <0|1>          -> OK SPRAY
-    STOP                 -> OK STOP   (spray off, rail stop)
-    HB                   (heartbeat, no reply; ESP32 shuts spray off after 1 s without any command)
+    STOP                 -> OK STOP   (spray off, gantry stops)
+    HB                   (heartbeat, no reply; ESP32 stops spray + motion after 1 s without any command)
 Errors come back as:  ERR <COMMAND> <reason>
 ESP32 -> Pi also streams telemetry ("T ...", see sensor.py) and "LOG ..." messages.
 
@@ -41,13 +40,12 @@ def find_port():
 
 
 class ESP32Link:
-    def __init__(self, port=None, baud=cfg.SERIAL_BAUD, rail_enabled=cfg.RAIL_ENABLED):
+    def __init__(self, port=None, baud=cfg.SERIAL_BAUD):
         import serial
 
         self.port = port or cfg.SERIAL_PORT or find_port()
         if not self.port:
             raise RuntimeError("No ESP32 serial port found. Is it plugged in? Try --port /dev/ttyUSB0")
-        self.rail_enabled = rail_enabled
         self._ser = serial.Serial(self.port, baud, timeout=0.1)
         time.sleep(2.0)                    # opening the port resets the ESP32; let it boot
         self._ser.reset_input_buffer()
@@ -126,32 +124,26 @@ class ESP32Link:
     def ping(self):
         return self.command("PING")
 
-    def home(self, timeout=30.0):
-        """Home the rail against its limit switch. Returns True when homed."""
-        if not self.rail_enabled:
-            return True
+    def home(self, timeout=60.0):
+        """Home both axes against their limit switches. Returns True when homed."""
         if not self.command("HOME"):
             return False
         deadline = time.monotonic() + timeout
+        time.sleep(0.2)
         while time.monotonic() < deadline:
             if self.telemetry.homed and not self.telemetry.moving:
                 return True
             time.sleep(0.1)
         return False
 
-    def move_rail(self, mm):
-        if not self.rail_enabled:
-            return True
-        return self.command(f"MOVE {mm:.1f}")
+    def move(self, x_mm, y_mm, wait=True):
+        return self.command(f"MOVE {x_mm:.1f} {y_mm:.1f}", wait=wait)
 
-    def rail_done(self, mm):
-        if not self.rail_enabled:
-            return True
+    def at(self, x_mm, y_mm):
+        """True once the carriage has stopped at (x_mm, y_mm)."""
         t = self.telemetry
-        return not t.moving and abs(t.rail_mm - mm) <= cfg.RAIL_TOLERANCE_MM
-
-    def aim(self, pan, tilt, wait=True):
-        return self.command(f"AIM {pan:.1f} {tilt:.1f}", wait=wait)
+        return (not t.moving and abs(t.x_mm - x_mm) <= cfg.POS_TOLERANCE_MM
+                and abs(t.y_mm - y_mm) <= cfg.POS_TOLERANCE_MM)
 
     def spray(self, on):
         return self.command(f"SPRAY {1 if on else 0}")
@@ -161,8 +153,8 @@ class ESP32Link:
         return time.monotonic() - self.telemetry.stamp < cfg.TELEMETRY_STALE_S
 
     def shutdown(self):
-        """Spray off, nozzle to rest, close the port."""
-        for cmd in ("SPRAY 0", f"AIM {cfg.REST_PAN_DEG:.1f} {cfg.REST_TILT_DEG:.1f}"):
+        """Spray off, stop the gantry, close the port."""
+        for cmd in ("SPRAY 0", "STOP"):
             try:
                 self.command(cmd, timeout=0.5)
             except Exception:

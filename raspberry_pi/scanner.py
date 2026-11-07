@@ -28,23 +28,13 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
-# ---------------------------------------------------------------------------
-# Tunable settings (move these into config.py once that file is set up)
-# ---------------------------------------------------------------------------
-SENSOR_W, SENSOR_H = 32, 24   # MLX90640 resolution
-SCALE = 10                    # upscale factor -> 320x240 working image
-REFRESH_HZ = 8                # sensor refresh rate: 2, 4, 8 or 16 (higher needs fast I2C)
-
-FIRE_TEMP_C = 60.0            # pixels at/above this are "fire"
-AMBIENT_DELTA_C = 15.0        # ...and must also be this much hotter than the room
-MIN_AREA = 30                 # working-image px^2 (~0.3 sensor pixels); ignore smaller blobs
-
-MAX_MATCH_DIST = 50           # working px: max movement between frames for the same fire
-CONFIRM_FRAMES = 3            # frames needed before a fire counts (sensor is only ~8 fps)
-MAX_MISSED_FRAMES = 3         # drop a fire after this many frames without seeing it
-GROWTH_WINDOW_S = 2.0         # seconds of history used for growth rate
-
-DISPLAY_MIN_C, DISPLAY_MAX_C = 15.0, 100.0   # color range for the preview window
+# All tunable numbers live in config.py.
+from config import (
+    SENSOR_W, SENSOR_H, SCALE, REFRESH_HZ, FLIP_H, FLIP_V,
+    FIRE_TEMP_C, AMBIENT_DELTA_C, MIN_AREA,
+    MAX_MATCH_DIST, CONFIRM_FRAMES, MAX_MISSED_FRAMES, GROWTH_WINDOW_S,
+    DISPLAY_MIN_C, DISPLAY_MAX_C,
+)
 
 
 def default_params():
@@ -70,7 +60,9 @@ class Detection:
 
 def upscale(temps):
     """24x32 temperature grid -> smooth 240x320 float image (still in deg C)."""
-    return cv2.resize(temps.astype(np.float32),(SENSOR_W * SCALE, SENSOR_H * SCALE),interpolation=cv2.INTER_CUBIC)
+    return cv2.resize(temps.astype(np.float32),
+                      (SENSOR_W * SCALE, SENSOR_H * SCALE),
+                      interpolation=cv2.INTER_CUBIC)
 
 
 def ambient_temp(temps):
@@ -232,7 +224,7 @@ class FireTracker:
 class ThermalCamera:
     """MLX90640 over I2C. Returns 24x32 numpy arrays of deg C."""
 
-    def __init__(self, refresh_hz=REFRESH_HZ, flip_h=False, flip_v=False):
+    def __init__(self, refresh_hz=REFRESH_HZ, flip_h=FLIP_H, flip_v=FLIP_V):
         import board
         import busio
         import adafruit_mlx90640
@@ -362,7 +354,8 @@ def run(args):
         source = None
         print(f"Using saved frame {args.frame}")
     else:
-        source = SimulatedThermal() if args.sim else ThermalCamera(args.hz, args.flip_h, args.flip_v)
+        source = (SimulatedThermal() if args.sim
+                  else ThermalCamera(args.hz, args.flip_h or FLIP_H, args.flip_v or FLIP_V))
         print(f"Using {source.source}")
 
     tracker = FireTracker()

@@ -1,12 +1,9 @@
 """
-System state and safety logic
-"""
-"""
 state_machine.py - the brain.
 
-    SCAN -> AIM -> CONFIRM -> SUPPRESS -> VERIFY -> SCAN
-             ^                   |  |        |
-             +---- re-aim -------+           +-- still burning: retry (max MAX_ATTEMPTS)
+    SCAN -> MOVE -> CONFIRM -> SUPPRESS -> VERIFY -> SCAN
+             ^                    |           |
+             +-- re-position -----+           +-- still burning: retry (max MAX_ATTEMPTS)
     Any state -> ESTOP while the emergency button is held.
 
 Every tick: read a thermal frame, update fire tracking, read ESP32 telemetry,
@@ -28,7 +25,7 @@ log = logging.getLogger("brain")
 
 class State(str, Enum):
     SCAN = "SCAN"
-    AIM = "AIM"
+    MOVE = "MOVE"
     CONFIRM = "CONFIRM"
     SUPPRESS = "SUPPRESS"
     VERIFY = "VERIFY"
@@ -37,6 +34,10 @@ class State(str, Enum):
 
 def _dist(ax, ay, bx, by):
     return math.hypot(ax - bx, ay - by)
+
+
+def _clamp(v, lo, hi):
+    return max(lo, min(hi, v))
 
 
 class FireSuppressor:
@@ -57,14 +58,14 @@ class FireSuppressor:
 
         self._spraying = False
         self.target_id = None
-        self.target_xy = None
+        self.target_xy = None          # last known position in the thermal image
         self.target_since = 0.0
         self.target_start_score = 0.0
         self.plan = None
         self.confirmed = False
         self.attempts = 0
         self.reaims = 0
-        self.blocked = []          # (cx, cy, until): false positives / given-up fires
+        self.blocked = []              # (cx, cy, until): false positives / given-up fires
         self.ambient = 20.0
         self.detections = []
         self.temps_big = None
@@ -78,17 +79,13 @@ class FireSuppressor:
         if not self.hw.ping():
             raise RuntimeError("ESP32 not responding to PING")
         self.hw.spray(False)
-        self.hw.aim(cfg.REST_PAN_DEG, cfg.REST_TILT_DEG)
-        if self.targeting.rail_enabled:
-            log.info("Homing rail...")
-            if self.hw.home():
-                log.info("Rail homed")
-            else:
-                log.error("Rail did not home (check the limit switch). Continuing WITHOUT the rail.")
-                self.targeting.rail_enabled = False
-                self.hw.rail_enabled = False
+        log.info("Homing gantry...")
+        if not self.hw.home():
+            raise RuntimeError("Gantry did not home - check both limit switches and the stepper wiring")
+        log.info("Homed")
+        self.hw.move(cfg.PARK_X_MM, cfg.PARK_Y_MM)
         if not self.targeting.calibrated:
-            log.warning("No calibration.json - using rough area mapping. Run calibrate.py for accurate aim.")
+            log.warning("No calibration.json - using rough area mapping. Run calibrate.py for accurate positioning.")
         log.info("Flame confirmation: %s", "ON" if self.require_flame else "OFF (thermal only)")
         self._go(State.SCAN, time.monotonic(), "ready")
 
@@ -133,45 +130,40 @@ class FireSuppressor:
         cands = [f for f in self.tracker.candidates() if not self._is_blocked(f, now)]
         if not cands:
             return
-        ranked = self.targeting.rank(cands, self._rail_mm())
+        ranked = self.targeting.rank(cands, self._gantry_xy())
         log.info("Fires: " + ", ".join(
             f"#{f.id} a={f.area:.0f} g={f.growth_rate:+.2f} {f.max_temp:.0f}C" for f in ranked))
         self._set_target(ranked[0])
         self.attempts = 0
         self.reaims = 0
         self.confirmed = False
-        self._go(State.AIM, now, f"target #{ranked[0].id}")
+        self._go(State.MOVE, now, f"target #{ranked[0].id}")
 
-    def _aim(self, now):
+    def _move(self, now):
         fire = self._locate()
         if not self._entered:
             cx, cy = (fire.cx, fire.cy) if fire else self.target_xy
             self.plan = self.targeting.plan(cx, cy)
-            self.hw.move_rail(self.plan.rail_mm)
-            self.hw.aim(self.plan.pan, self.plan.tilt)
+            self.hw.move(self.plan.x_mm, self.plan.y_mm)
             x, y = self.plan.floor_xy
-            log.info("Aim: floor (%.1f, %.1f) cm -> rail %.0f mm, pan %.1f, tilt %.1f",
-                     x, y, self.plan.rail_mm, self.plan.pan, self.plan.tilt)
+            log.info("Move: fire at floor (%.1f, %.1f) cm -> gantry (%.0f, %.0f) mm",
+                     x, y, self.plan.x_mm, self.plan.y_mm)
             self._entered = True
 
-        if fire is None and now - self.state_since > cfg.LOST_GRACE_S:
-            self._go(State.SCAN, now, "lost target while aiming")
+        # The carriage can block the camera's view as it arrives, so only give up on a
+        # lost target if we haven't confirmed it yet.
+        if fire is None and not self.confirmed and now - self.state_since > cfg.LOST_GRACE_S + 3:
+            self._go(State.SCAN, now, "lost target while moving")
             return
-        if self.hw.rail_done(self.plan.rail_mm) and now - self.state_since >= cfg.AIM_SETTLE_S:
-            if self.confirmed:
-                self._go(State.SUPPRESS, now, "re-aimed")
-            else:
-                self._go(State.CONFIRM, now)
-        elif now - self.state_since > cfg.AIM_TIMEOUT_S:
+        if self.hw.at(self.plan.x_mm, self.plan.y_mm) and now - self.state_since >= cfg.MOVE_SETTLE_S:
+            self._go(State.SUPPRESS if self.confirmed else State.CONFIRM, now,
+                     "back over the fire" if self.confirmed else "")
+        elif now - self.state_since > cfg.MOVE_TIMEOUT_S:
             self._block(now, "couldn't reach target")
-            self._go(State.SCAN, now, "aim timeout")
+            self._go(State.SCAN, now, "move timeout")
 
     def _confirm(self, now):
         if now - self.state_since < cfg.CONFIRM_S:
-            return
-        fire = self._locate()
-        if fire is None:
-            self._go(State.SCAN, now, "fire vanished before confirming")
             return
         if not self.require_flame:
             self.confirmed = True
@@ -185,6 +177,7 @@ class FireSuppressor:
         else:
             self.stats["false_alarms"] += 1
             self._block(now, "false positive")
+            self._park()
             self._go(State.SCAN, now, f"FALSE POSITIVE: hot but no flame ({level:.0f} < {threshold})")
 
     def _suppress(self, now):
@@ -198,18 +191,22 @@ class FireSuppressor:
             self._entered = True
 
         # --- progress: is the heat (thermal) or flame (sensor) dropping? ---
-        heat = self._heat(fire) if fire else 0.0
         flame_now = self.flame.mean(since=now - 0.5)
-        if heat < self.best_heat * (1 - cfg.PROGRESS_MIN_DROP):
-            self.best_heat = heat
-            self.last_progress = now
+        if fire is not None:
+            heat = self._heat(fire)
+            if heat < self.best_heat * (1 - cfg.PROGRESS_MIN_DROP):
+                self.best_heat = heat
+                self.last_progress = now
         if self.require_flame and flame_now < self.best_flame * (1 - cfg.PROGRESS_MIN_DROP):
             self.best_flame = flame_now
             self.last_progress = now
 
-        # --- out? (no hot blob here, and flame sensor quiet) ---
-        flame_low = (not self.require_flame) or flame_now < cfg.FLAME_OUT_THRESHOLD
-        if not self._visible_near_target() and flame_low:
+        # --- out? flame sensor quiet (if used) and no hot blob there ---
+        if self.require_flame:
+            looks_out = flame_now < cfg.FLAME_OUT_THRESHOLD and not self._visible_near_target()
+        else:
+            looks_out = not self._visible_near_target()
+        if looks_out:
             self.out_since = self.out_since or now
             if now - self.out_since >= cfg.OUT_CONFIRM_S:
                 self._spray(False)
@@ -218,9 +215,11 @@ class FireSuppressor:
         else:
             self.out_since = None
 
-        # --- sweep side to side across the base of the fire ---
-        sweep = cfg.SWEEP_DEG * math.sin(2 * math.pi * (now - self.state_since) / cfg.SWEEP_PERIOD_S)
-        self.hw.aim(self.plan.pan + sweep, self.plan.tilt, wait=False)
+        # --- small circles over the fire to cover the whole thing ---
+        a = 2 * math.pi * (now - self.state_since) / cfg.SWEEP_PERIOD_S
+        self.hw.move(_clamp(self.plan.x_mm + cfg.SWEEP_MM * math.cos(a), 0, cfg.X_TRAVEL_MM),
+                     _clamp(self.plan.y_mm + cfg.SWEEP_MM * math.sin(a), 0, cfg.Y_TRAVEL_MM),
+                     wait=False)
 
         # --- another fire got much worse? switch ---
         # Compare against this fire's size when we STARTED on it: it's supposed to
@@ -237,26 +236,42 @@ class FireSuppressor:
                     self.confirmed = False
                     self.attempts = 0
                     self.reaims = 0
-                    self._go(State.AIM, now, f"switching to much bigger fire #{best.id}")
+                    self._go(State.MOVE, now, f"switching to much bigger fire #{best.id}")
                     return
 
-        # --- spraying isn't helping -> aim is probably off, re-aim ---
+        # --- spraying isn't helping -> position is probably off, re-position ---
         if now - self.last_progress > cfg.NO_PROGRESS_S:
             self._spray(False)
             self.reaims += 1
             if self.reaims > cfg.MAX_REAIMS:
                 self.stats["gave_up"] += 1
-                self._block(now, "no progress after re-aiming")
+                self._block(now, "no progress after re-positioning")
                 log.warning("Can't make progress on this fire - moving on")
+                self._park()
                 self._go(State.SCAN, now, "gave up on fire")
             else:
-                self._go(State.AIM, now, f"no progress, re-aim {self.reaims}/{cfg.MAX_REAIMS}")
+                self._go(State.MOVE, now, f"no progress, re-position {self.reaims}/{cfg.MAX_REAIMS}")
 
     def _verify(self, now):
-        if now - self.state_since < cfg.VERIFY_WAIT_S:
+        # Park out of the camera's way first, so the carriage isn't hiding the fire.
+        if not self._entered:
+            if cfg.VERIFY_PARK:
+                self._park()
+            self.verify_from = None
+            self._entered = True
+        if self.verify_from is None:
+            if not cfg.VERIFY_PARK or self.hw.at(cfg.PARK_X_MM, cfg.PARK_Y_MM) \
+                    or now - self.state_since > cfg.MOVE_TIMEOUT_S:
+                self.verify_from = now
             return
-        flame_high = self.require_flame and self.flame.mean(since=now - 0.5) >= cfg.FLAME_THRESHOLD
-        if self._visible_near_target() or flame_high:
+        if now - self.verify_from < cfg.VERIFY_WAIT_S:
+            return
+
+        still_hot = any(_dist(d.cx, d.cy, *self.target_xy) < cfg.REACQUIRE_PX
+                        for d in self.detections) if self.target_xy else False
+        flame_high = (not cfg.VERIFY_PARK and self.require_flame
+                      and self.flame.mean(since=now - 0.5) >= cfg.FLAME_THRESHOLD)
+        if still_hot or flame_high:
             self.attempts += 1
             if self.attempts >= cfg.MAX_ATTEMPTS:
                 self.stats["gave_up"] += 1
@@ -266,14 +281,13 @@ class FireSuppressor:
             else:
                 self.confirmed = True
                 self.reaims = 0
-                self._go(State.AIM, now, f"still burning, attempt {self.attempts + 1}/{cfg.MAX_ATTEMPTS}")
+                self._go(State.MOVE, now, f"still burning, attempt {self.attempts + 1}/{cfg.MAX_ATTEMPTS}")
             return
         self.stats["put_out"] += 1
         if self.target_id is not None:
             self.tracker.forget(self.target_id)
         log.info("FIRE OUT (total %d)", self.stats["put_out"])
         self.target_id = None
-        self.hw.aim(cfg.REST_PAN_DEG, cfg.REST_TILT_DEG, wait=False)
         self._go(State.SCAN, now, "fire out - rescanning")
 
     def _estop(self, now):
@@ -296,8 +310,12 @@ class FireSuppressor:
             self.hw.spray(on)
             self._spraying = on
 
-    def _rail_mm(self):
-        return self.hw.telemetry.rail_mm if self.targeting.rail_enabled else None
+    def _park(self):
+        self.hw.move(cfg.PARK_X_MM, cfg.PARK_Y_MM, wait=False)
+
+    def _gantry_xy(self):
+        t = self.hw.telemetry
+        return t.x_mm, t.y_mm
 
     def _set_target(self, fire):
         self.target_id = fire.id
@@ -346,5 +364,5 @@ class FireSuppressor:
         tel = self.hw.telemetry
         tgt = f"#{self.target_id}" if self.target_id is not None and self.state != State.SCAN else "-"
         return (f"[{self.state.value:8}] fires={len(self.tracker.candidates())} target={tgt} "
-                f"flame={tel.flame:4d} rail={tel.rail_mm:5.0f}mm "
+                f"flame={tel.flame:4d} gantry=({tel.x_mm:3.0f},{tel.y_mm:3.0f})mm "
                 f"{self.env.describe()} out={self.stats['put_out']} false={self.stats['false_alarms']}")

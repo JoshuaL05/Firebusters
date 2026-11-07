@@ -1,14 +1,10 @@
 """
-MLX90614 Temperature readings
-"""
-
-"""
 sensor.py - readings that come back from the ESP32.
 
 The ESP32 streams one telemetry line ~20 times a second:
-    T <flame> <temp_c> <humidity> <rail_mm> <moving> <spraying> <homed> <estop>
+    T <flame> <temp_c> <humidity> <x_mm> <y_mm> <moving> <spraying> <homed> <estop>
 e.g.
-    T 2310 23.0 41.0 120.5 0 1 1 0
+    T 2310 23.0 41.0 120.5 88.0 0 1 1 0
 
 This file parses those lines and turns the raw numbers into things the
 state machine cares about: a smoothed flame level and a "room is heating up"
@@ -28,8 +24,9 @@ class Telemetry:
     flame: int = 0             # 0-4095, higher = more flame (ESP32 already inverts the module)
     temp_c: float = math.nan   # DHT11 room temperature
     humidity: float = math.nan # DHT11 relative humidity, %
-    rail_mm: float = 0.0       # carriage position
-    moving: bool = False       # rail moving or homing
+    x_mm: float = 0.0          # carriage position
+    y_mm: float = 0.0
+    moving: bool = False       # gantry moving or homing
     spraying: bool = False
     homed: bool = False
     estop: bool = False        # emergency stop button pressed
@@ -39,18 +36,19 @@ class Telemetry:
 def parse_telemetry(line, stamp):
     """Parse one 'T ...' line. Returns Telemetry, or None if the line is malformed."""
     parts = line.split()
-    if len(parts) != 9 or parts[0] != "T":
+    if len(parts) != 10 or parts[0] != "T":
         return None
     try:
         return Telemetry(
             flame=int(float(parts[1])),
             temp_c=float(parts[2]),
             humidity=float(parts[3]),
-            rail_mm=float(parts[4]),
-            moving=parts[5] == "1",
-            spraying=parts[6] == "1",
-            homed=parts[7] == "1",
-            estop=parts[8] == "1",
+            x_mm=float(parts[4]),
+            y_mm=float(parts[5]),
+            moving=parts[6] == "1",
+            spraying=parts[7] == "1",
+            homed=parts[8] == "1",
+            estop=parts[9] == "1",
             stamp=stamp,
         )
     except ValueError:

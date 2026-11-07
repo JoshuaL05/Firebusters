@@ -1,0 +1,10 @@
+# On the Pi, install numpy/opencv/pyserial with apt (see README), then:
+#   python3 -m venv --system-site-packages venv && source venv/bin/activate
+#   pip install -r requirements.txt
+# On a laptop (simulator only), plain `pip install -r requirements.txt` works;
+# the adafruit packages are only needed on the Pi.
+numpy
+opencv-python
+pyserial
+adafruit-circuitpython-mlx90640; platform_machine == "aarch64" or platform_machine == "armv7l"
+adafruit-blinka; platform_machine == "aarch64" or platform_machine == "armv7l"

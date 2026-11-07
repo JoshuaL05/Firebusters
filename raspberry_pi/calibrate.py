@@ -8,11 +8,15 @@ Step 1 (camera -> floor), needs only the MLX90640:
   each time and saves calibration.json, which main.py loads automatically.
   Mark the 4 spots with tape first; they're CALIBRATION_POINTS_CM in config.py.
 
-Step 2 (floor -> nozzle), needs the ESP32 too:
+Step 2 (floor -> gantry), needs the ESP32 too:
     python3 calibrate.py --aim-test
-  Type floor coordinates (e.g. "30 20") and the nozzle points there. If it's
-  consistently off, adjust PAN_TRIM_DEG / TILT_TRIM_DEG / TILT_LOB_DEG in
-  config.py. Type "spray" to test-spray for 0.5 s, "q" to quit.
+  Homes the gantry, then:
+    "0 0"      -> drive to gantry home. Measure the floor spot under the nozzle and
+                  put it in HOME_FLOOR_X_CM / HOME_FLOOR_Y_CM in config.py.
+    "15 15"    -> drive so the nozzle is over floor point (15, 15) cm. Check it lines up
+                  with a taped spot.
+    "g 100 50" -> drive to raw gantry position (100, 50) mm.
+    "spray"    -> test-spray for 0.5 s.     "q" -> quit.
 """
 
 import argparse
@@ -80,13 +84,14 @@ def calibrate_camera(args):
 
 def aim_test(args):
     from motion import ESP32Link
-    t = Targeting(rail_enabled=cfg.RAIL_ENABLED and not args.no_rail)
-    hw = ESP32Link(port=args.port, rail_enabled=t.rail_enabled)
+    t = Targeting()
+    hw = ESP32Link(port=args.port)
     try:
-        if t.rail_enabled and not hw.home():
-            print("Rail didn't home - check the limit switch. Use --no-rail to skip it.")
+        print("Homing...")
+        if not hw.home():
+            print("Gantry didn't home - check the limit switches.")
             return
-        print('Type "x y" in cm to aim, "spray" to test-spray, "q" to quit.')
+        print('Type "x y" (floor cm), "g x y" (gantry mm), "spray", or "q".')
         while True:
             cmd = input("> ").strip().lower()
             if cmd in ("q", "quit", "exit"):
@@ -96,18 +101,23 @@ def aim_test(args):
                 time.sleep(0.5)
                 hw.spray(False)
                 continue
+            raw = cmd.startswith("g ")
             try:
-                x, y = (float(v) for v in cmd.replace(",", " ").split())
+                a, b = (float(v) for v in cmd.lstrip("g ").replace(",", " ").split())
             except ValueError:
-                print('  expected two numbers, e.g. "30 20"')
+                print('  expected two numbers, e.g. "15 15" or "g 100 50"')
                 continue
-            plan = t.plan_floor(x, y)
-            hw.move_rail(plan.rail_mm)
-            deadline = time.monotonic() + 15
-            while not hw.rail_done(plan.rail_mm) and time.monotonic() < deadline:
+            if raw:
+                gx, gy = a, b
+            else:
+                plan = t.plan_floor(a, b)
+                gx, gy = plan.x_mm, plan.y_mm
+            hw.move(gx, gy)
+            deadline = time.monotonic() + 20
+            while not hw.at(gx, gy) and time.monotonic() < deadline:
                 time.sleep(0.05)
-            hw.aim(plan.pan, plan.tilt)
-            print(f"  rail {plan.rail_mm:.0f} mm, pan {plan.pan:.1f}, tilt {plan.tilt:.1f}")
+            fx, fy = t.gantry_to_floor(gx, gy)
+            print(f"  gantry ({gx:.0f}, {gy:.0f}) mm  -> nozzle should be over floor ({fx:.1f}, {fy:.1f}) cm")
     finally:
         hw.shutdown()
 
@@ -117,6 +127,5 @@ if __name__ == "__main__":
     ap.add_argument("--aim-test", action="store_true", help="interactive aim test (needs ESP32)")
     ap.add_argument("--fire-temp", type=float, default=40.0, help="detection threshold for the hot object")
     ap.add_argument("--port", help="ESP32 serial port")
-    ap.add_argument("--no-rail", action="store_true")
     a = ap.parse_args()
     aim_test(a) if a.aim_test else calibrate_camera(a)
