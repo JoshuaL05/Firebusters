@@ -1,22 +1,23 @@
 """
-scanner.py - camera-based flame detection and tracking.
+scanner.py - thermal fire detection and tracking (MLX90640).
 
-Finds bright flame-colored blobs in camera frames and tracks them over time,
-so the later stages (targeting / state machine) get a list of stable fire
-candidates with position, size and growth rate.
+Reads 32x24 temperature frames from an MLX90640 thermal camera, finds hot
+blobs, and tracks them over time so the later stages (targeting / state
+machine) get a list of stable fire candidates with position, size, temperature
+and growth rate.
 
-Works with:
-  - a laptop webcam (OpenCV VideoCapture)
-  - the Raspberry Pi Camera V2.1 (picamera2), used automatically when available
-  - a still image, for quick testing
+Sources:
+  - MLX90640 over I2C on the Raspberry Pi (default)
+  - a built-in simulator with fake growing fires (--sim), for testing on a laptop
+  - a saved frame (.npy) from the 's' key (--frame file.npy)
 
 Try it:
-  python scanner.py                    # live camera, preview window + tuning sliders
-  python scanner.py --image test.jpg   # run detection on one photo
-  python scanner.py --headless         # Pi over SSH (no screen): prints detections
-  python scanner.py --exposure 5000    # Pi camera only: fixed short exposure (microseconds)
+  python scanner.py --sim                  # laptop test, no sensor needed
+  python scanner.py --headless             # Pi over SSH: prints detections
+  python scanner.py --fire-temp 45         # lower threshold (e.g. hot-water mugs)
+  python scanner.py --frame thermal_123.npy
 
-Keys in the preview window:  q = quit,  p = print current slider values,  s = save snapshot
+Keys in the preview window:  q = quit,  p = print slider values,  s = save raw frame (.npy)
 """
 
 import argparse
@@ -30,37 +31,26 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Tunable settings (move these into config.py once that file is set up)
 # ---------------------------------------------------------------------------
-CAMERA_INDEX = 0          # webcam index for OpenCV
-FRAME_WIDTH = 640
-FRAME_HEIGHT = 480
+SENSOR_W, SENSOR_H = 32, 24   # MLX90640 resolution
+SCALE = 10                    # upscale factor -> 320x240 working image
+REFRESH_HZ = 8                # sensor refresh rate: 2, 4, 8 or 16 (higher needs fast I2C)
 
-# HSV thresholds. OpenCV hue runs 0-179 (red ~0, orange ~10-20, yellow ~25-35).
-HUE_MIN = 0
-HUE_MAX = 35
-SAT_MIN = 80
-VAL_MIN = 200
-# Flame cores are often so bright they wash out to near-white. Those pixels
-# count as flame only if they sit right next to flame-colored pixels, so a
-# plain white light or white paper doesn't trigger detection on its own.
-CORE_VAL_MIN = 245
-CORE_SAT_MAX = 60
+FIRE_TEMP_C = 60.0            # pixels at/above this are "fire"
+AMBIENT_DELTA_C = 15.0        # ...and must also be this much hotter than the room
+MIN_AREA = 30                 # working-image px^2 (~0.3 sensor pixels); ignore smaller blobs
 
-MIN_AREA = 40             # px^2: ignore blobs smaller than this
-MAX_MATCH_DIST = 60       # px: max movement between frames to count as the same fire
-CONFIRM_FRAMES = 5        # matched frames needed before a fire counts as a candidate
-MAX_MISSED_FRAMES = 5     # drop a fire after this many frames without seeing it
-GROWTH_WINDOW_S = 2.0     # seconds of history used to compute growth rate
+MAX_MATCH_DIST = 50           # working px: max movement between frames for the same fire
+CONFIRM_FRAMES = 3            # frames needed before a fire counts (sensor is only ~8 fps)
+MAX_MISSED_FRAMES = 3         # drop a fire after this many frames without seeing it
+GROWTH_WINDOW_S = 2.0         # seconds of history used for growth rate
+
+DISPLAY_MIN_C, DISPLAY_MAX_C = 15.0, 100.0   # color range for the preview window
 
 
 def default_params():
-    """Detection thresholds as a dict, so they can be changed live by sliders."""
     return {
-        "hue_min": HUE_MIN,
-        "hue_max": HUE_MAX,
-        "sat_min": SAT_MIN,
-        "val_min": VAL_MIN,
-        "core_val_min": CORE_VAL_MIN,
-        "core_sat_max": CORE_SAT_MAX,
+        "fire_temp": FIRE_TEMP_C,
+        "ambient_delta": AMBIENT_DELTA_C,
         "min_area": MIN_AREA,
     }
 
@@ -70,40 +60,40 @@ def default_params():
 # ---------------------------------------------------------------------------
 @dataclass
 class Detection:
-    cx: float     # center x, pixels
-    cy: float     # center y, pixels
-    area: float   # blob area, pixels^2
-    bbox: tuple   # (x, y, w, h)
+    cx: float         # center x, working-image pixels (0..319)
+    cy: float         # center y, working-image pixels (0..239)
+    area: float       # blob area, working-image pixels^2
+    bbox: tuple       # (x, y, w, h)
+    max_temp: float   # hottest point in the blob, deg C
+    mean_temp: float  # average blob temperature, deg C
 
 
-def make_mask(frame_bgr, params=None):
-    """Return a black/white mask where white = flame-like pixels."""
+def upscale(temps):
+    """24x32 temperature grid -> smooth 240x320 float image (still in deg C)."""
+    return cv2.resize(temps.astype(np.float32),(SENSOR_W * SCALE, SENSOR_H * SCALE),interpolation=cv2.INTER_CUBIC)
+
+
+def ambient_temp(temps):
+    """Room temperature estimate: the median pixel (fires are a small part of the view)."""
+    return float(np.median(temps))
+
+
+def make_mask(temps_big, ambient, params=None):
+    """White = hot enough to be fire. Hot must be above the absolute threshold
+    AND well above room temperature, so a warm room doesn't trigger everything."""
     p = params or default_params()
-    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-
-    colored = cv2.inRange(
-        hsv,
-        (p["hue_min"], p["sat_min"], p["val_min"]),
-        (p["hue_max"], 255, 255),
-    )
-
-    core = cv2.inRange(hsv, (0, 0, p["core_val_min"]), (179, p["core_sat_max"], 255))
-    near_colored = cv2.dilate(colored, np.ones((15, 15), np.uint8))
-    core = cv2.bitwise_and(core, near_colored)
-
-    mask = cv2.bitwise_or(colored, core)
-
-    # Clean up speckle noise and fill small holes inside flames.
+    threshold = max(p["fire_temp"], ambient + p["ambient_delta"])
+    mask = (temps_big >= threshold).astype(np.uint8) * 255
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     return mask
 
 
-def detect(frame_bgr, params=None):
-    """Find flame blobs in one frame. Returns (detections, mask)."""
+def detect(temps, params=None):
+    """Find hot blobs in one 24x32 frame. Returns (detections, mask, temps_big)."""
     p = params or default_params()
-    mask = make_mask(frame_bgr, p)
+    temps_big = upscale(temps)
+    mask = make_mask(temps_big, ambient_temp(temps), p)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     detections = []
@@ -112,17 +102,26 @@ def detect(frame_bgr, params=None):
         if area < p["min_area"]:
             continue
         x, y, w, h = cv2.boundingRect(c)
-        m = cv2.moments(c)
-        if m["m00"] > 0:
-            cx, cy = m["m10"] / m["m00"], m["m01"] / m["m00"]
-        else:
-            cx, cy = x + w / 2, y + h / 2
-        detections.append(Detection(cx, cy, area, (x, y, w, h)))
-    return detections, mask
+        blob = np.zeros(mask.shape, np.uint8)
+        cv2.drawContours(blob, [c], -1, 255, -1)
+        blob_temps = temps_big[blob > 0]
+        if blob_temps.size == 0:
+            continue
+
+        # Heat-weighted center: aims at the hottest part, not just the outline's middle.
+        weights = np.where(blob > 0, np.clip(temps_big - p["fire_temp"], 0, None) + 1e-3, 0)
+        total = weights.sum()
+        ys, xs = np.indices(weights.shape)
+        cx = float((weights * xs).sum() / total) if total > 0 else x + w / 2
+        cy = float((weights * ys).sum() / total) if total > 0 else y + h / 2
+
+        detections.append(Detection(cx, cy, area, (x, y, w, h),
+                                    float(blob_temps.max()), float(blob_temps.mean())))
+    return detections, mask, temps_big
 
 
 # ---------------------------------------------------------------------------
-# Tracking (across frames)
+# Tracking (across frames) - same idea as before
 # ---------------------------------------------------------------------------
 @dataclass
 class Fire:
@@ -131,6 +130,8 @@ class Fire:
     cy: float
     area: float
     bbox: tuple
+    max_temp: float
+    mean_temp: float
     frames_seen: int = 1
     missed: int = 0
     history: deque = field(default_factory=lambda: deque(maxlen=300))  # (time, area)
@@ -144,13 +145,18 @@ class Fire:
         return self.missed == 0
 
     @property
+    def sensor_xy(self):
+        """Center in original sensor pixels (0..31, 0..23), handy for calibration."""
+        return self.cx / SCALE, self.cy / SCALE
+
+    @property
     def growth_rate(self):
         """Fractional area change per second over the last GROWTH_WINDOW_S.
-        0.5 means growing 50% per second; negative means shrinking."""
+        0.5 = growing 50% per second; negative = shrinking."""
         if len(self.history) < 2:
             return 0.0
         t_now, a_now = self.history[-1]
-        for t_old, a_old in self.history:          # oldest sample inside the window
+        for t_old, a_old in self.history:
             if t_now - t_old <= GROWTH_WINDOW_S:
                 break
         dt = t_now - t_old
@@ -158,11 +164,15 @@ class Fire:
             return 0.0
         return (a_now - a_old) / a_old / dt
 
+    def _apply(self, det, t):
+        self.cx, self.cy, self.area, self.bbox = det.cx, det.cy, det.area, det.bbox
+        self.max_temp, self.mean_temp = det.max_temp, det.mean_temp
+        self.history.append((t, det.area))
+
 
 class FireTracker:
-    """Keeps an ID on each fire across frames so we know which ones are stable
-    and how they're growing. Flames flicker, so a fire survives a few missed
-    frames before being dropped."""
+    """Keeps an ID on each fire across frames. A fire survives a few missed
+    frames before being dropped, since readings can be noisy."""
 
     def __init__(self):
         self.fires = []
@@ -171,7 +181,6 @@ class FireTracker:
     def update(self, detections, t=None):
         t = time.monotonic() if t is None else t
 
-        # Greedy matching: closest fire/detection pairs first.
         pairs = []
         for fi, fire in enumerate(self.fires):
             for di, det in enumerate(detections):
@@ -186,13 +195,11 @@ class FireTracker:
                 continue
             used_fires.add(fi)
             used_dets.add(di)
-            fire, det = self.fires[fi], detections[di]
-            fire.cx, fire.cy, fire.area, fire.bbox = det.cx, det.cy, det.area, det.bbox
+            fire = self.fires[fi]
+            fire._apply(detections[di], t)
             fire.frames_seen += 1
             fire.missed = 0
-            fire.history.append((t, det.area))
 
-        # Fires not seen this frame: count the miss, drop if gone too long.
         kept = []
         for fi, fire in enumerate(self.fires):
             if fi not in used_fires:
@@ -201,14 +208,13 @@ class FireTracker:
                 kept.append(fire)
         self.fires = kept
 
-        # New detections become new fires.
         for di, det in enumerate(detections):
             if di not in used_dets:
-                fire = Fire(self._next_id, det.cx, det.cy, det.area, det.bbox)
+                fire = Fire(self._next_id, det.cx, det.cy, det.area, det.bbox,
+                            det.max_temp, det.mean_temp)
                 fire.history.append((t, det.area))
                 self.fires.append(fire)
                 self._next_id += 1
-
         return self.fires
 
     def candidates(self):
@@ -216,63 +222,82 @@ class FireTracker:
         return [f for f in self.fires if f.confirmed and f.visible]
 
     def forget(self, fire_id):
-        """Remove a fire, e.g. once it's been put out or marked a false positive."""
+        """Remove a fire, e.g. once it's out or marked a false positive."""
         self.fires = [f for f in self.fires if f.id != fire_id]
 
 
 # ---------------------------------------------------------------------------
-# Camera (Pi camera if available, otherwise webcam)
+# Thermal sources
 # ---------------------------------------------------------------------------
-class Camera:
-    def __init__(self, index=CAMERA_INDEX, width=FRAME_WIDTH, height=FRAME_HEIGHT, force_webcam=False, exposure_us=None):
-        self._picam = None
-        self._cap = None
-        self.source = None
+class ThermalCamera:
+    """MLX90640 over I2C. Returns 24x32 numpy arrays of deg C."""
 
-        if not force_webcam:
-            try:
-                from picamera2 import Picamera2
-                self._picam = Picamera2()
-                # "RGB888" in picamera2 is stored in B,G,R order, which is what OpenCV expects.
-                cfg = self._picam.create_preview_configuration(
-                    main={"size": (width, height), "format": "RGB888"})
-                self._picam.configure(cfg)
-                self._picam.start()
-                if exposure_us:
-                    # A short fixed exposure keeps flames orange instead of
-                    # washing out to white, and darkens the background.
-                    self._picam.set_controls({"AeEnable": False, "ExposureTime": int(exposure_us)})
-                time.sleep(1.0)  # let the sensor settle
-                self.source = "picamera2"
-            except Exception:
-                if self._picam is not None:
-                    try:
-                        self._picam.close()
-                    except Exception:
-                        pass
-                self._picam = None
+    def __init__(self, refresh_hz=REFRESH_HZ, flip_h=False, flip_v=False):
+        import board
+        import busio
+        import adafruit_mlx90640
 
-        if self._picam is None:
-            self._cap = cv2.VideoCapture(index)
-            self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-            self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-            if not self._cap.isOpened():
-                raise RuntimeError(f"Couldn't open webcam {index}")
-            self.source = f"webcam {index}"
+        rates = {
+            2: adafruit_mlx90640.RefreshRate.REFRESH_2_HZ,
+            4: adafruit_mlx90640.RefreshRate.REFRESH_4_HZ,
+            8: adafruit_mlx90640.RefreshRate.REFRESH_8_HZ,
+            16: adafruit_mlx90640.RefreshRate.REFRESH_16_HZ,
+        }
+        i2c = busio.I2C(board.SCL, board.SDA, frequency=1_000_000)
+        self._mlx = adafruit_mlx90640.MLX90640(i2c)
+        self._mlx.refresh_rate = rates.get(refresh_hz, rates[4])
+        self._buf = [0.0] * (SENSOR_W * SENSOR_H)
+        self.flip_h, self.flip_v = flip_h, flip_v
+        self.source = f"MLX90640 @ {refresh_hz} Hz"
 
     def read(self):
-        """Return the latest frame as a BGR numpy array, or None on failure."""
-        if self._picam is not None:
-            return self._picam.capture_array()
-        ok, frame = self._cap.read()
-        return frame if ok else None
+        for _ in range(3):  # the sensor occasionally returns a bad frame; just retry
+            try:
+                self._mlx.getFrame(self._buf)
+                break
+            except (ValueError, RuntimeError, OSError):
+                continue
+        else:
+            return None
+        temps = np.array(self._buf, dtype=np.float32).reshape(SENSOR_H, SENSOR_W)
+        if self.flip_h:
+            temps = temps[:, ::-1]
+        if self.flip_v:
+            temps = temps[::-1, :]
+        return temps
 
     def close(self):
-        if self._picam is not None:
-            self._picam.stop()
-            self._picam.close()
-        if self._cap is not None:
-            self._cap.release()
+        pass
+
+
+class SimulatedThermal:
+    """Fake sensor for testing without hardware: a 22 deg C room, a person-
+    temperature blob (should be ignored), and two fires that grow over time."""
+
+    def __init__(self, fps=8):
+        self.t0 = time.monotonic()
+        self.fps = fps
+        self.source = "simulator"
+        self._ys, self._xs = np.indices((SENSOR_H, SENSOR_W))
+
+    def _blob(self, x, y, radius, peak, base):
+        d2 = (self._xs - x) ** 2 + (self._ys - y) ** 2
+        return (peak - base) * np.exp(-d2 / (2 * radius ** 2))
+
+    def read(self):
+        time.sleep(1 / self.fps)
+        t = time.monotonic() - self.t0
+        base = 22.0
+        temps = np.full((SENSOR_H, SENSOR_W), base, np.float32)
+        temps += np.random.normal(0, 0.3, temps.shape).astype(np.float32)
+        temps += self._blob(4, 18, 1.5, 34, base)                      # person: ~34 C
+        temps += self._blob(8, 8, 1.2 + 0.05 * t, 200, base)           # slow fire
+        if t > 3:                                                      # 2nd fire appears, grows fast
+            temps += self._blob(24, 14, 0.8 + 0.25 * (t - 3), 300, base)
+        return temps
+
+    def close(self):
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -283,30 +308,32 @@ def preview_score(fire):
     return fire.area * (1 + max(fire.growth_rate, 0))
 
 
-def draw_overlay(frame, fires):
-    out = frame.copy()
+def colorize(temps_big):
+    norm = np.clip((temps_big - DISPLAY_MIN_C) / (DISPLAY_MAX_C - DISPLAY_MIN_C), 0, 1)
+    return cv2.applyColorMap((norm * 255).astype(np.uint8), cv2.COLORMAP_INFERNO)
+
+
+def draw_overlay(temps_big, fires):
+    out = colorize(temps_big)
     ranked = sorted([f for f in fires if f.confirmed and f.visible], key=preview_score, reverse=True)
     rank_of = {f.id: i + 1 for i, f in enumerate(ranked)}
-
     for f in fires:
         if not f.visible:
             continue
         x, y, w, h = f.bbox
         color = (0, 255, 0) if f.confirmed else (160, 160, 160)
-        cv2.rectangle(out, (x, y), (x + w, y + h), color, 2)
-        cv2.circle(out, (int(f.cx), int(f.cy)), 3, color, -1)
-        label = f"#{f.id} a={int(f.area)} g={f.growth_rate:+.2f}"
+        cv2.rectangle(out, (x, y), (x + w, y + h), color, 1)
+        cv2.drawMarker(out, (int(f.cx), int(f.cy)), color, cv2.MARKER_CROSS, 10, 1)
+        label = f"#{f.id} {f.max_temp:.0f}C a={int(f.area)} g={f.growth_rate:+.2f}"
         if f.id in rank_of:
             label = f"P{rank_of[f.id]} " + label
-        cv2.putText(out, label, (x, max(y - 6, 12)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
+        cv2.putText(out, label, (x, max(y - 4, 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
     return out
 
 
-SLIDERS = [  # (name, params key, max value)
-    ("hue min", "hue_min", 179),
-    ("hue max", "hue_max", 179),
-    ("sat min", "sat_min", 255),
-    ("val min", "val_min", 255),
+SLIDERS = [  # (name, params key, max)
+    ("fire temp C", "fire_temp", 300),
+    ("above room C", "ambient_delta", 100),
     ("min area", "min_area", 2000),
 ]
 
@@ -321,58 +348,46 @@ def read_sliders(window, params):
         params[key] = cv2.getTrackbarPos(name, window)
 
 
-def run_image(path):
-    frame = cv2.imread(path)
-    if frame is None:
-        raise SystemExit(f"Couldn't read image: {path}")
-    params = default_params()
-    win = "scanner"
-    cv2.namedWindow(win)
-    make_sliders(win, params)
-    print("Adjust sliders; press q to quit, p to print values.")
-    while True:
-        read_sliders(win, params)
-        detections, mask = detect(frame, params)
-        out = frame.copy()
-        for d in sorted(detections, key=lambda d: d.area, reverse=True):
-            x, y, w, h = d.bbox
-            cv2.rectangle(out, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            cv2.putText(out, f"a={int(d.area)}", (x, max(y - 6, 12)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
-        cv2.imshow(win, out)
-        cv2.imshow("mask", mask)
-        key = cv2.waitKey(50) & 0xFF
-        if key == ord("q"):
-            break
-        if key == ord("p"):
-            print(params)
-    cv2.destroyAllWindows()
+def summary(fires):
+    if not fires:
+        return "no fires"
+    return " | ".join(
+        f"#{f.id} ({f.cx:.0f},{f.cy:.0f}) {f.max_temp:.0f}C a={f.area:.0f} g={f.growth_rate:+.2f}"
+        for f in fires)
 
 
-def run_live(args):
-    cam = Camera(index=args.camera, force_webcam=args.webcam, exposure_us=args.exposure)
-    print(f"Using {cam.source}")
+def run(args):
+    if args.frame:
+        frame = np.load(args.frame)
+        source = None
+        print(f"Using saved frame {args.frame}")
+    else:
+        source = SimulatedThermal() if args.sim else ThermalCamera(args.hz, args.flip_h, args.flip_v)
+        print(f"Using {source.source}")
+
     tracker = FireTracker()
     params = default_params()
+    if args.fire_temp is not None:
+        params["fire_temp"] = args.fire_temp
 
-    win = "scanner"
+    win = "thermal"
     if not args.headless:
         cv2.namedWindow(win)
         make_sliders(win, params)
-        print("Keys: q = quit, p = print slider values, s = save snapshot")
+        print("Keys: q = quit, p = print slider values, s = save raw frame")
 
     last_print = 0.0
     try:
         while True:
-            frame = cam.read()
-            if frame is None:
-                print("Camera returned no frame, stopping.")
-                break
+            temps = frame if source is None else source.read()
+            if temps is None:
+                print("Sensor returned no frame, retrying...")
+                continue
 
             if not args.headless:
                 read_sliders(win, params)
 
-            detections, mask = detect(frame, params)
+            detections, mask, temps_big = detect(temps, params)
             tracker.update(detections)
 
             if args.headless:
@@ -380,42 +395,37 @@ def run_live(args):
                 if now - last_print >= 1.0:
                     last_print = now
                     cands = sorted(tracker.candidates(), key=preview_score, reverse=True)
-                    if cands:
-                        print(" | ".join(
-                            f"#{f.id} ({f.cx:.0f},{f.cy:.0f}) a={f.area:.0f} g={f.growth_rate:+.2f}"
-                            for f in cands))
-                    else:
-                        print("no fires")
+                    print(f"room {ambient_temp(temps):.1f}C, max {temps.max():.1f}C -> {summary(cands)}")
+                if source is None:
+                    time.sleep(0.1)
                 continue
 
-            cv2.imshow(win, draw_overlay(frame, tracker.fires))
+            cv2.imshow(win, draw_overlay(temps_big, tracker.fires))
             cv2.imshow("mask", mask)
-            key = cv2.waitKey(1) & 0xFF
+            key = cv2.waitKey(1 if source else 50) & 0xFF
             if key == ord("q"):
                 break
             if key == ord("p"):
                 print(params)
             if key == ord("s"):
-                name = f"snapshot_{int(time.time())}.jpg"
-                cv2.imwrite(name, frame)
+                name = f"thermal_{int(time.time())}.npy"
+                np.save(name, temps)
                 print(f"Saved {name}")
     except KeyboardInterrupt:
         pass
     finally:
-        cam.close()
+        if source:
+            source.close()
         cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="Flame detection test tool")
-    ap.add_argument("--image", help="run on a still image instead of a camera")
-    ap.add_argument("--camera", type=int, default=CAMERA_INDEX, help="webcam index")
-    ap.add_argument("--webcam", action="store_true", help="use webcam even if picamera2 exists")
+    ap = argparse.ArgumentParser(description="Thermal fire detection test tool")
+    ap.add_argument("--sim", action="store_true", help="use the built-in simulator (no sensor)")
+    ap.add_argument("--frame", help="run on a saved .npy frame")
     ap.add_argument("--headless", action="store_true", help="no windows, print detections")
-    ap.add_argument("--exposure", type=int, help="Pi camera fixed exposure in microseconds")
-    args = ap.parse_args()
-
-    if args.image:
-        run_image(args.image)
-    else:
-        run_live(args)
+    ap.add_argument("--fire-temp", type=float, help=f"fire threshold in C (default {FIRE_TEMP_C})")
+    ap.add_argument("--hz", type=int, default=REFRESH_HZ, help="sensor refresh rate: 2, 4, 8, 16")
+    ap.add_argument("--flip-h", action="store_true", help="mirror image left-right")
+    ap.add_argument("--flip-v", action="store_true", help="flip image upside down")
+    run(ap.parse_args())
