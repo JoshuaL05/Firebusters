@@ -40,6 +40,7 @@ class SimObject:
     flame: bool             # real flame (visible to the flame sensor)
     growth: float = 0.0     # radius growth per second
     name: str = ""
+    cooling: float = 0.0    # deg C lost per second on its own (leftover wax)
 
 
 class SimWorld:
@@ -80,6 +81,7 @@ class SimWorld:
         for o in self.objects:
             if o.flame:
                 o.radius = min(4.0, o.radius + o.growth * dt)
+            o.temp -= o.cooling * dt
             if self.spraying and o.temp > 50:
                 d = self.nozzle_distance_cm(o)
                 if d < HIT_CM + o.radius:              # spray cone covers part of the fire
@@ -88,6 +90,10 @@ class SimWorld:
                         o.radius -= SPRAY_RATE * hit * dt
                     else:
                         o.temp -= 15 * hit * dt        # water cools the mug
+        # A put-out candle leaves a warm patch of melted wax behind for a while.
+        for o in self.objects:
+            if o.flame and o.radius <= 0.35:
+                self.objects.append(SimObject(o.px, o.py, 1.2, 90, False, 0.0, "warm wax", cooling=0.6))
         self.objects = [o for o in self.objects
                         if (o.radius > 0.35 if o.flame else (o.temp > 40 or o.name == "person"))]
 
@@ -148,10 +154,7 @@ class SimESP32:
         w = self.world
         temp, hum = w.room()
         moving = abs(w.x_mm - w.tx_mm) > 0.5 or abs(w.y_mm - w.ty_mm) > 0.5
-        return Telemetry(flame=w.flame_reading(), temp_c=temp, humidity=hum,
-                         x_mm=w.x_mm, y_mm=w.y_mm, moving=moving,
-                         spraying=w.spraying, homed=w.homed, estop=w.estop,
-                         stamp=time.monotonic())
+        return Telemetry(flame=w.flame_reading(), temp_c=temp, humidity=hum,x_mm=w.x_mm, y_mm=w.y_mm, moving=moving,spraying=w.spraying, homed=w.homed, estop=w.estop,stamp=time.monotonic())
 
     def ping(self):
         return True
