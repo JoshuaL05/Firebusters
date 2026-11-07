@@ -1,17 +1,12 @@
 """
-Main Program entry point
-
-"""
-"""
 main.py - start the whole system.
 
   python3 main.py                       # real hardware (MLX90640 + ESP32)
   python3 main.py --sim --show          # laptop: simulated fires, live heat map window
   python3 main.py --sim                 # laptop/SSH: simulated, text status only
   python3 main.py --no-flame-confirm    # testing with hot mugs (no real flame)
-  python3 main.py --no-rail             # pan-tilt only, no stepper rail
 
-Ctrl+C stops cleanly: spray off, nozzle to rest.
+Ctrl+C stops cleanly: spray off, gantry stops.
 """
 
 import argparse
@@ -31,7 +26,6 @@ def parse_args():
     ap.add_argument("--sim", action="store_true", help="simulate camera, fires and ESP32")
     ap.add_argument("--show", action="store_true", help="show live heat-map window (needs a screen)")
     ap.add_argument("--no-flame-confirm", action="store_true", help="thermal-only (hot-mug testing)")
-    ap.add_argument("--no-rail", action="store_true", help="no stepper rail, pan-tilt only")
     ap.add_argument("--port", help="ESP32 serial port, e.g. /dev/ttyUSB0")
     ap.add_argument("--fire-temp", type=float, help=f"fire threshold C (default {cfg.FIRE_TEMP_C})")
     ap.add_argument("--duration", type=float, help="stop after this many seconds")
@@ -50,15 +44,15 @@ def setup_logging(args):
 
 
 def build(args):
-    targeting = Targeting(rail_enabled=cfg.RAIL_ENABLED and not args.no_rail)
+    targeting = Targeting()
     if args.sim:
         from sim import SimESP32, SimThermal, SimWorld
         world = SimWorld(targeting)
-        thermal, hw = SimThermal(world), SimESP32(world, targeting.rail_enabled)
+        thermal, hw = SimThermal(world), SimESP32(world)
     else:
         from motion import ESP32Link
         thermal = scanner.ThermalCamera()
-        hw = ESP32Link(port=args.port, rail_enabled=targeting.rail_enabled)
+        hw = ESP32Link(port=args.port)
 
     params = scanner.default_params()
     if args.fire_temp is not None:
@@ -76,6 +70,11 @@ def draw(machine):
     if machine.target_xy and machine.state.value != "SCAN":
         cx, cy = (int(v * 2) for v in machine.target_xy)
         cv2.circle(img, (cx, cy), 24, (255, 255, 0), 2)
+    # where the nozzle is right now
+    tel = machine.hw.telemetry
+    nx, ny = machine.targeting.floor_to_pixel(*machine.targeting.gantry_to_floor(tel.x_mm, tel.y_mm))
+    nozzle_color = (255, 128, 0) if tel.spraying else (200, 200, 200)
+    cv2.drawMarker(img, (int(nx * 2), int(ny * 2)), nozzle_color, cv2.MARKER_TILTED_CROSS, 18, 2)
     color = (0, 0, 255) if machine.state.value in ("SUPPRESS", "ESTOP") else (255, 255, 255)
     cv2.putText(img, machine.state.value, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
     cv2.putText(img, f"fires out: {machine.stats['put_out']}",
@@ -108,7 +107,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        log.info("Shutting down: spray off, nozzle to rest")
+        log.info("Shutting down: spray off, gantry stop")
         machine.stop()
         try:
             machine.thermal.close()

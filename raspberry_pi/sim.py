@@ -4,11 +4,12 @@ sim.py - a fake world for testing the whole system without hardware.
 Simulates:
   - two real fires (one slow, one fast-growing) and a third that appears later
   - a hot mug with NO flame (should be rejected as a false positive by the flame sensor)
-  - a person at ~34 C (below fire temperature, should be ignored)
-  - the ESP32: rail, pan-tilt, spray, flame sensor pointed where the nozzle aims, DHT11
+  - a person-temperature blob at ~34 C (below fire temperature, should be ignored)
+  - the ESP32: x/y gantry, spray, flame sensor pointing down from the carriage, DHT11
 
-Spraying only shrinks a fire if the nozzle is actually aimed at it, using the
-same geometry as targeting.py - so bad aiming logic shows up as fires not going out.
+Spraying only shrinks a fire if the nozzle is actually over it, using the same
+pixel -> floor -> gantry maths as targeting.py, so bad positioning logic shows
+up as fires not going out.
 
 Used by: python3 main.py --sim [--show]
 """
@@ -24,10 +25,10 @@ import config as cfg
 from sensor import Telemetry
 
 AMBIENT_C = 21.0
-RAIL_SPEED_MM_S = 120.0
-HIT_DEG = 8.0               # aim error under which the spray hits
+GANTRY_SPEED_MM_S = 120.0
+HIT_CM = 2.0                # nozzle within this distance of a fire = direct hit
 SPRAY_RATE = 0.35           # fire radius (sensor px) removed per second of direct hit
-FLAME_FOV_DEG = 25.0        # flame sensor cone (with a tube on it)
+FLAME_VIEW_CM = 6.0         # flame sensor sees flames within this distance of the carriage
 
 
 @dataclass
@@ -53,19 +54,18 @@ class SimWorld:
             SimObject(4, 19, 1.8, 34, False, 0.0, "person"),
         ]
         self._spawned_late = False
-        # actuator state (what the ESP32 would be doing)
-        self.pan, self.tilt = cfg.REST_PAN_DEG, cfg.REST_TILT_DEG
-        self.rail_mm = 0.0
-        self.rail_target = 0.0
+        # what the ESP32 would be doing
+        self.x_mm = self.y_mm = 0.0
+        self.tx_mm = self.ty_mm = 0.0
         self.spraying = False
         self.homed = False
         self.estop = False
         self._ys, self._xs = np.indices((cfg.SENSOR_H, cfg.SENSOR_W))
 
-    def aim_error(self, obj):
-        x, y = self.targeting.pixel_to_floor(obj.px * cfg.SCALE, obj.py * cfg.SCALE)
-        need_pan, need_tilt = self.targeting.angles(self.targeting.nozzle_x(self.rail_mm), x, y)
-        return math.hypot(self.pan - need_pan, self.tilt - need_tilt)
+    def nozzle_distance_cm(self, obj):
+        fx, fy = self.targeting.pixel_to_floor(obj.px * cfg.SCALE, obj.py * cfg.SCALE)
+        nx, ny = self.targeting.gantry_to_floor(self.x_mm, self.y_mm)
+        return math.hypot(fx - nx, fy - ny)
 
     def step(self, dt):
         self.t += dt
@@ -73,20 +73,21 @@ class SimWorld:
             self.objects.append(SimObject(15, 12, 1.2, 300, True, 0.05, "late fire"))
             self._spawned_late = True
 
-        step = RAIL_SPEED_MM_S * dt
-        self.rail_mm += max(-step, min(step, self.rail_target - self.rail_mm))
+        step = GANTRY_SPEED_MM_S * dt
+        self.x_mm += max(-step, min(step, self.tx_mm - self.x_mm))
+        self.y_mm += max(-step, min(step, self.ty_mm - self.y_mm))
 
         for o in self.objects:
             if o.flame:
                 o.radius = min(4.0, o.radius + o.growth * dt)
             if self.spraying and o.temp > 50:
-                err = self.aim_error(o)
-                if err < HIT_DEG:
-                    hit = 1 - err / HIT_DEG
+                d = self.nozzle_distance_cm(o)
+                if d < HIT_CM + o.radius:              # spray cone covers part of the fire
+                    hit = max(0.3, 1 - d / (HIT_CM + o.radius))
                     if o.flame:
                         o.radius -= SPRAY_RATE * hit * dt
                     else:
-                        o.temp -= 15 * hit * dt   # water cools the mug
+                        o.temp -= 15 * hit * dt        # water cools the mug
         self.objects = [o for o in self.objects
                         if (o.radius > 0.35 if o.flame else (o.temp > 40 or o.name == "person"))]
 
@@ -104,9 +105,9 @@ class SimWorld:
         level = 0.0
         for o in self.objects:
             if o.flame:
-                err = self.aim_error(o)
-                if err < FLAME_FOV_DEG:
-                    level += 4095 * min(1.0, o.radius / 2.0) * (1 - err / FLAME_FOV_DEG)
+                d = self.nozzle_distance_cm(o)
+                if d < FLAME_VIEW_CM:
+                    level += 4095 * min(1.0, o.radius / 2.0) * (1 - d / FLAME_VIEW_CM)
         level += random.gauss(150, 40)         # background IR noise
         return int(max(0, min(4095, level)))
 
@@ -138,43 +139,38 @@ class SimThermal:
 class SimESP32:
     """Stands in for motion.ESP32Link (same methods)."""
 
-    def __init__(self, world, rail_enabled=cfg.RAIL_ENABLED):
+    def __init__(self, world):
         self.world = world
-        self.rail_enabled = rail_enabled
         self.connected = True
 
     @property
     def telemetry(self):
         w = self.world
         temp, hum = w.room()
+        moving = abs(w.x_mm - w.tx_mm) > 0.5 or abs(w.y_mm - w.ty_mm) > 0.5
         return Telemetry(flame=w.flame_reading(), temp_c=temp, humidity=hum,
-                         rail_mm=w.rail_mm, moving=abs(w.rail_mm - w.rail_target) > 0.5,
+                         x_mm=w.x_mm, y_mm=w.y_mm, moving=moving,
                          spraying=w.spraying, homed=w.homed, estop=w.estop,
                          stamp=time.monotonic())
 
     def ping(self):
         return True
 
-    def home(self, timeout=30.0):
-        self.world.rail_mm = self.world.rail_target = 0.0
-        self.world.homed = True
+    def home(self, timeout=60.0):
+        w = self.world
+        w.x_mm = w.y_mm = w.tx_mm = w.ty_mm = 0.0
+        w.homed = True
         return True
 
-    def move_rail(self, mm):
-        if self.rail_enabled:
-            self.world.rail_target = max(0.0, min(cfg.RAIL_LENGTH_MM, mm))
+    def move(self, x_mm, y_mm, wait=True):
+        self.world.tx_mm = max(0.0, min(cfg.X_TRAVEL_MM, x_mm))
+        self.world.ty_mm = max(0.0, min(cfg.Y_TRAVEL_MM, y_mm))
         return True
 
-    def rail_done(self, mm):
-        if not self.rail_enabled:
-            return True
+    def at(self, x_mm, y_mm):
         t = self.telemetry
-        return not t.moving and abs(t.rail_mm - mm) <= cfg.RAIL_TOLERANCE_MM
-
-    def aim(self, pan, tilt, wait=True):
-        self.world.pan = max(0.0, min(180.0, pan))
-        self.world.tilt = max(0.0, min(180.0, tilt))
-        return True
+        return (not t.moving and abs(t.x_mm - x_mm) <= cfg.POS_TOLERANCE_MM
+                and abs(t.y_mm - y_mm) <= cfg.POS_TOLERANCE_MM)
 
     def spray(self, on):
         self.world.spraying = bool(on)
@@ -182,4 +178,3 @@ class SimESP32:
 
     def shutdown(self):
         self.spray(False)
-        self.aim(cfg.REST_PAN_DEG, cfg.REST_TILT_DEG)
