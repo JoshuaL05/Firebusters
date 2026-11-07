@@ -66,6 +66,7 @@ class FireSuppressor:
         self.attempts = 0
         self.reaims = 0
         self.blocked = []              # (cx, cy, until): false positives / given-up fires
+        self.recent_out = []           # (cx, cy, until): fires we put out (wax stays warm a while)
         self.ambient = 20.0
         self.detections = []
         self.temps_big = None
@@ -175,10 +176,15 @@ class FireSuppressor:
             self.confirmed = True
             self._go(State.SUPPRESS, now, f"flame sensor {level:.0f} >= {threshold}")
         else:
-            self.stats["false_alarms"] += 1
-            self._block(now, "false positive")
             self._park()
-            self._go(State.SCAN, now, f"FALSE POSITIVE: hot but no flame ({level:.0f} < {threshold})")
+            if self._near_recent_out(now):
+                # Melted wax / hot surface left over from a fire we already put out.
+                self._block(now, "leftover heat")
+                self._go(State.SCAN, now, f"just leftover heat from a fire we put out (flame {level:.0f})")
+            else:
+                self.stats["false_alarms"] += 1
+                self._block(now, "false positive")
+                self._go(State.SCAN, now, f"FALSE POSITIVE: hot but no flame ({level:.0f} < {threshold})")
 
     def _suppress(self, now):
         fire = self._locate()
@@ -201,9 +207,11 @@ class FireSuppressor:
             self.best_flame = flame_now
             self.last_progress = now
 
-        # --- out? flame sensor quiet (if used) and no hot blob there ---
+        # --- out? ---
+        # With the flame sensor (right above the fire): no flame = out, even if the
+        # spot is still warm (melted wax). Without it: the hot spot has to disappear.
         if self.require_flame:
-            looks_out = flame_now < cfg.FLAME_OUT_THRESHOLD and not self._visible_near_target()
+            looks_out = flame_now < cfg.FLAME_OUT_THRESHOLD
         else:
             looks_out = not self._visible_near_target()
         if looks_out:
@@ -253,25 +261,29 @@ class FireSuppressor:
                 self._go(State.MOVE, now, f"no progress, re-position {self.reaims}/{cfg.MAX_REAIMS}")
 
     def _verify(self, now):
-        # Park out of the camera's way first, so the carriage isn't hiding the fire.
+        # With the flame sensor: stay over the spot and ask it "any flame left?".
+        #   (The camera can't tell a relit candle from warm wax, the flame sensor can.)
+        # Thermal-only: park out of the camera's way, then look for the hot spot.
+        park = cfg.VERIFY_PARK and not self.require_flame
         if not self._entered:
-            if cfg.VERIFY_PARK:
+            if park:
                 self._park()
             self.verify_from = None
             self._entered = True
         if self.verify_from is None:
-            if not cfg.VERIFY_PARK or self.hw.at(cfg.PARK_X_MM, cfg.PARK_Y_MM) \
+            if not park or self.hw.at(cfg.PARK_X_MM, cfg.PARK_Y_MM) \
                     or now - self.state_since > cfg.MOVE_TIMEOUT_S:
                 self.verify_from = now
             return
         if now - self.verify_from < cfg.VERIFY_WAIT_S:
             return
 
-        still_hot = any(_dist(d.cx, d.cy, *self.target_xy) < cfg.REACQUIRE_PX
-                        for d in self.detections) if self.target_xy else False
-        flame_high = (not cfg.VERIFY_PARK and self.require_flame
-                      and self.flame.mean(since=now - 0.5) >= cfg.FLAME_THRESHOLD)
-        if still_hot or flame_high:
+        if self.require_flame:
+            still_burning = self.flame.mean(since=now - 0.5) >= cfg.FLAME_THRESHOLD
+        else:
+            still_burning = any(_dist(d.cx, d.cy, *self.target_xy) < cfg.REACQUIRE_PX
+                                for d in self.detections) if self.target_xy else False
+        if still_burning:
             self.attempts += 1
             if self.attempts >= cfg.MAX_ATTEMPTS:
                 self.stats["gave_up"] += 1
@@ -286,8 +298,11 @@ class FireSuppressor:
         self.stats["put_out"] += 1
         if self.target_id is not None:
             self.tracker.forget(self.target_id)
+        if self.target_xy:
+            self.recent_out.append((*self.target_xy, now + cfg.WARM_SPOT_S))
         log.info("FIRE OUT (total %d)", self.stats["put_out"])
         self.target_id = None
+        self._park()
         self._go(State.SCAN, now, "fire out - rescanning")
 
     def _estop(self, now):
@@ -355,6 +370,11 @@ class FireSuppressor:
         if self.target_xy:
             self.blocked.append((*self.target_xy, now + cfg.FALSE_POSITIVE_COOLDOWN_S))
             log.info("Ignoring that spot for %.0fs (%s)", cfg.FALSE_POSITIVE_COOLDOWN_S, why)
+
+    def _near_recent_out(self, now):
+        self.recent_out = [r for r in self.recent_out if r[2] > now]
+        return self.target_xy is not None and any(
+            _dist(*self.target_xy, rx, ry) < cfg.BLOCK_RADIUS_PX for rx, ry, _ in self.recent_out)
 
     def _is_blocked(self, fire, now):
         self.blocked = [b for b in self.blocked if b[2] > now]

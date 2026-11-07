@@ -103,9 +103,12 @@ PROGRESS_MIN_DROP = 0.05    # 5% drop in heat or flame counts as progress
 NO_PROGRESS_S = 3.0         # no progress for this long -> re-position over the fire
 MAX_REAIMS = 3
 OUT_CONFIRM_S = 1.0         # fire must look out for this long before verifying
-VERIFY_PARK = True          # move out of the camera's way before double-checking
+VERIFY_PARK = True          # thermal-only mode: move out of the camera's way before double-checking
+                            # (with the flame sensor it stays put and asks the flame sensor instead)
 VERIFY_WAIT_S = 2.0
 MAX_ATTEMPTS = 3
+WARM_SPOT_S = 60.0          # a spot we put out may stay hot (melted wax) for this long;
+                            # if it gets checked again with no flame, it's not a "false alarm"
 
 # ---------------------------------------------------------------------------
 # Environment (DHT11)
