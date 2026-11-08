@@ -5,7 +5,7 @@ Simulates:
   - two real fires (one slow, one fast-growing) and a third that appears later
   - a hot mug with NO flame (should be rejected as a false positive by the flame sensor)
   - a person-temperature blob at ~34 C (below fire temperature, should be ignored)
-  - the ESP32: x/y gantry, spray, flame sensor pointing down from the carriage, DHT11
+  - the ESP32: x/y gantry, spray, flame sensor pointing down from the carriage
 
 Spraying only shrinks a fire if the nozzle is actually over it, using the same
 pixel -> floor -> gantry maths as targeting.py, so bad positioning logic shows
@@ -117,10 +117,6 @@ class SimWorld:
         level += random.gauss(150, 40)         # background IR noise
         return int(max(0, min(4095, level)))
 
-    def room(self):
-        fire_size = sum(o.radius for o in self.objects if o.flame)
-        return AMBIENT_C + 0.8 * fire_size, 42.0 - 1.5 * fire_size
-
 
 class SimThermal:
     """Stands in for scanner.ThermalCamera."""
@@ -152,9 +148,10 @@ class SimESP32:
     @property
     def telemetry(self):
         w = self.world
-        temp, hum = w.room()
         moving = abs(w.x_mm - w.tx_mm) > 0.5 or abs(w.y_mm - w.ty_mm) > 0.5
-        return Telemetry(flame=w.flame_reading(), temp_c=temp, humidity=hum,x_mm=w.x_mm, y_mm=w.y_mm, moving=moving,spraying=w.spraying, homed=w.homed, estop=w.estop,stamp=time.monotonic())
+        return Telemetry(flame=w.flame_reading(), x_mm=w.x_mm, y_mm=w.y_mm, moving=moving,
+                        spraying=w.spraying, homed=w.homed, estop=w.estop,
+                        stamp=time.monotonic())
 
     def ping(self):
         return True
