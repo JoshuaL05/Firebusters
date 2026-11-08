@@ -319,7 +319,9 @@ def draw_overlay(temps_big, fires):
         label = f"#{f.id} {f.max_temp:.0f}C a={int(f.area)} g={f.growth_rate:+.2f}"
         if f.id in rank_of:
             label = f"P{rank_of[f.id]} " + label
-        cv2.putText(out, label, (x, max(y - 4, 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
+        (tw, _), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)
+        tx = max(0, min(x, out.shape[1] - tw - 2))          # keep labels inside the image
+        cv2.putText(out, label, (tx, max(y - 4, 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
     return out
 
 
@@ -355,7 +357,7 @@ def run(args):
         print(f"Using saved frame {args.frame}")
     else:
         source = (SimulatedThermal() if args.sim
-                  else ThermalCamera(args.hz, args.flip_h or FLIP_H, args.flip_v or FLIP_V))
+                else ThermalCamera(args.hz, args.flip_h or FLIP_H, args.flip_v or FLIP_V))
         print(f"Using {source.source}")
 
     tracker = FireTracker()

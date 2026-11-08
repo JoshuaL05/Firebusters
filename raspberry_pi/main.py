@@ -2,8 +2,9 @@
 main.py - start the whole system.
 
   python3 main.py                       # real hardware (MLX90640 + ESP32)
-  python3 main.py --sim --show          # laptop: simulated fires, live heat map window
-  python3 main.py --sim                 # laptop/SSH: simulated, text status only
+  python3 main.py --web                 # ...plus live view at http://heatseek.local:8080
+  python3 main.py --sim --web           # simulated fires, live view in the browser
+  python3 main.py --sim --show          # laptop: simulated fires in a desktop window
   python3 main.py --no-flame-confirm    # testing with hot mugs (no real flame)
 
 Ctrl+C stops cleanly: spray off, gantry stops.
@@ -11,9 +12,12 @@ Ctrl+C stops cleanly: spray off, gantry stops.
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import time
+
+import cv2
 
 import config as cfg
 import scanner
@@ -24,7 +28,9 @@ from targeting import Targeting
 def parse_args():
     ap = argparse.ArgumentParser(description="FireBusters fire suppression")
     ap.add_argument("--sim", action="store_true", help="simulate camera, fires and ESP32")
-    ap.add_argument("--show", action="store_true", help="show live heat-map window (needs a screen)")
+    ap.add_argument("--web", action="store_true", help="live view in a web browser (port 8080)")
+    ap.add_argument("--web-port", type=int, default=8080)
+    ap.add_argument("--show", action="store_true", help="live view in a desktop window (needs a screen)")
     ap.add_argument("--no-flame-confirm", action="store_true", help="thermal-only (hot-mug testing)")
     ap.add_argument("--port", help="ESP32 serial port, e.g. /dev/ttyUSB0")
     ap.add_argument("--fire-temp", type=float, help=f"fire threshold C (default {cfg.FIRE_TEMP_C})")
@@ -61,16 +67,15 @@ def build(args):
     return FireSuppressor(thermal, hw, targeting, require_flame=require_flame, params=params)
 
 
-def draw(machine):
-    import cv2
+def render(machine):
+    """Heat map with fire boxes, target ring, nozzle marker and state. None until the first frame."""
     if machine.temps_big is None:
-        return True
+        return None
     img = scanner.draw_overlay(machine.temps_big, machine.tracker.fires)
     img = cv2.resize(img, None, fx=2, fy=2, interpolation=cv2.INTER_NEAREST)
     if machine.target_xy and machine.state.value != "SCAN":
         cx, cy = (int(v * 2) for v in machine.target_xy)
         cv2.circle(img, (cx, cy), 24, (255, 255, 0), 2)
-    # where the nozzle is right now
     tel = machine.hw.telemetry
     nx, ny = machine.targeting.floor_to_pixel(*machine.targeting.gantry_to_floor(tel.x_mm, tel.y_mm))
     nozzle_color = (255, 128, 0) if tel.spraying else (200, 200, 200)
@@ -79,8 +84,21 @@ def draw(machine):
     cv2.putText(img, machine.state.value, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
     cv2.putText(img, f"fires out: {machine.stats['put_out']}",
                 (10, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
-    cv2.imshow("FireBusters", img)
-    return (cv2.waitKey(1) & 0xFF) != ord("q")
+    return img
+
+
+def web_status(machine):
+    tel = machine.hw.telemetry
+    busy = machine.target_id is not None and machine.state.value != "SCAN"
+    return {
+        "state": machine.state.value,
+        "fires": len(machine.tracker.candidates()),
+        "target": f"#{machine.target_id}" if busy else "-",
+        "flame": int(tel.flame),
+        "pos": f"{tel.x_mm:.0f}, {tel.y_mm:.0f}",
+        "out": machine.stats["put_out"],
+        "false": machine.stats["false_alarms"],
+    }
 
 
 def main():
@@ -88,7 +106,23 @@ def main():
     setup_logging(args)
     log = logging.getLogger("main")
 
+    # Over SSH there's no screen; opening a window would crash the program.
+    if args.show and sys.platform.startswith("linux") \
+            and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        log.warning("--show needs a screen (none found - are you on SSH?). Use --web instead. "
+                    "Running without the window.")
+        args.show = False
+
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    web = None
+    if args.web:
+        from web import WebView
+        try:
+            web = WebView(args.web_port)
+        except OSError:
+            log.error("Port %d is busy - is another copy of main.py still running (check `tmux attach`)? "
+                      "Stop it, or use --web-port 8081. Continuing without the live view.", args.web_port)
 
     machine = build(args)
     machine.start()
@@ -100,8 +134,15 @@ def main():
             if now - last_status >= 1.0:
                 last_status = now
                 log.info(machine.status())
-            if args.show and not draw(machine):
-                break
+            if args.show or web:
+                img = render(machine)
+                if img is not None:
+                    if web:
+                        web.update(img, web_status(machine))
+                    if args.show:
+                        cv2.imshow("FireBusters", img)
+                        if (cv2.waitKey(1) & 0xFF) == ord("q"):
+                            break
             if args.duration and now - started >= args.duration:
                 break
     except KeyboardInterrupt:
@@ -113,8 +154,9 @@ def main():
             machine.thermal.close()
         except Exception:
             pass
+        if web:
+            web.close()
         if args.show:
-            import cv2
             cv2.destroyAllWindows()
         log.info("Results: %s", machine.stats)
 
