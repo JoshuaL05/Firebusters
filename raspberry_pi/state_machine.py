@@ -18,7 +18,7 @@ from enum import Enum
 
 import config as cfg
 import scanner
-from sensor import EnvMonitor, FlameWindow
+from sensor import FlameWindow
 
 log = logging.getLogger("brain")
 
@@ -49,7 +49,6 @@ class FireSuppressor:
         self.params = params or scanner.default_params()
 
         self.tracker = scanner.FireTracker()
-        self.env = EnvMonitor()
         self.flame = FlameWindow()
 
         self.state = State.SCAN
@@ -108,7 +107,6 @@ class FireSuppressor:
         self.ambient = scanner.ambient_temp(temps)
 
         tel = self.hw.telemetry
-        self.env.update(tel, now)
         self.flame.add(now, tel.flame)
 
         if not getattr(self.hw, "connected", True):
@@ -171,7 +169,7 @@ class FireSuppressor:
             self._go(State.SUPPRESS, now, "confirmed by thermal")
             return
         level = self.flame.mean(since=self.state_since)
-        threshold = cfg.FLAME_THRESHOLD_ALERT if self.env.alert else cfg.FLAME_THRESHOLD
+        threshold = cfg.FLAME_THRESHOLD
         if level >= threshold:
             self.confirmed = True
             self._go(State.SUPPRESS, now, f"flame sensor {level:.0f} >= {threshold}")
@@ -385,4 +383,4 @@ class FireSuppressor:
         tgt = f"#{self.target_id}" if self.target_id is not None and self.state != State.SCAN else "-"
         return (f"[{self.state.value:8}] fires={len(self.tracker.candidates())} target={tgt} "
                 f"flame={tel.flame:4d} gantry=({tel.x_mm:3.0f},{tel.y_mm:3.0f})mm "
-                f"{self.env.describe()} out={self.stats['put_out']} false={self.stats['false_alarms']}")
+                f"out={self.stats['put_out']} false={self.stats['false_alarms']}")

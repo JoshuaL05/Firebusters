@@ -2,19 +2,18 @@
  * FireBusters - ESP32 firmware (x, y gantry)
  *
  * The ESP32 is the "hands": it drives the two gantry steppers and the spray
- * trigger servo, reads the flame sensor + DHT11, and streams readings to the
+ * trigger servo, reads the flame sensor, and streams readings to the
  * Raspberry Pi over USB serial. The Pi makes every decision.
  *
  * Libraries (Arduino IDE: Library Manager / PlatformIO: see platformio.ini):
  *   - ESP32Servo              (Kevin Harrington)
  *   - AccelStepper            (Mike McCauley)
- *   - DHT sensor library      (Adafruit)  + Adafruit Unified Sensor
  * Arduino IDE users: rename this file to esp32.ino inside a folder called esp32/.
  *
  * Serial protocol, 115200 baud, one line per message:
  *   Pi -> ESP32:  PING | HOME | MOVE <x_mm> <y_mm> | SPRAY <0|1> | STOP | HB
  *   ESP32 -> Pi:  PONG | OK <CMD> | ERR <CMD> <reason> | LOG <text>
- *                 T <flame> <tempC> <hum> <x_mm> <y_mm> <moving> <spraying> <homed> <estop>  (every 50 ms)
+ *                 T <flame> <x_mm> <y_mm> <moving> <spraying> <homed> <estop>  (every 50 ms)
  *
  * Safety:
  *   - Watchdog: no command (incl. HB heartbeat) for 1 s -> spray off, gantry stops.
@@ -31,13 +30,11 @@
  *   E-stop button         GPIO 17        button between pin and GND (leave unconnected if none)
  *   Trigger servo signal  GPIO 21        presses the spray bottle; servo on its own 5 V, shared GND
  *   Flame sensor AO       GPIO 34        on the carriage pointing DOWN; power from 3.3 V
- *   DHT11 data            GPIO 4         power from 3.3 V
  */
 
 #include <Arduino.h>
 #include <ESP32Servo.h>
 #include <AccelStepper.h>
-#include <DHT.h>
 
 // ------------------------------------------------------------------ pins
 const int PIN_X_STEP = 26;
@@ -50,7 +47,6 @@ const int PIN_Y_LIMIT = 33;
 const int PIN_ESTOP = 17;
 const int PIN_TRIGGER = 21;
 const int PIN_FLAME_AO = 34;
-const int PIN_DHT = 4;
 
 // ------------------------------------------------------------------ settings
 const float X_STEPS_PER_MM   = 80.0f;   // GT2 belt + 20T pulley, 200 steps x 1/16 microstepping
@@ -71,7 +67,6 @@ const float TRIGGER_ON_DEG   = 80.0f;
 const bool  FLAME_ACTIVE_LOW = true;    // most flame modules: AO voltage DROPS when they see flame
 const unsigned long WATCHDOG_MS  = 1000;
 const unsigned long TELEMETRY_MS = 50;
-const unsigned long DHT_MS       = 2000; // DHT11 can't be read faster than ~1 Hz
 const unsigned long FLAME_MS     = 10;
 
 // ------------------------------------------------------------------ state
@@ -88,13 +83,12 @@ Axis axX = {AccelStepper(AccelStepper::DRIVER, PIN_X_STEP, PIN_X_DIR), PIN_X_LIM
 Axis axY = {AccelStepper(AccelStepper::DRIVER, PIN_Y_STEP, PIN_Y_DIR), PIN_Y_LIMIT, Y_STEPS_PER_MM, Y_TRAVEL_MM, false, false};
 
 Servo triggerServo;
-DHT dht(PIN_DHT, DHT11);
 
 bool spraying = false;
 bool estop = false;
 bool watchdogTripped = false;
-unsigned long homingStart = 0, lastCmdMs = 0, lastTelemetryMs = 0, lastDhtMs = 0, lastFlameMs = 0;
-float tempC = NAN, humidity = NAN, flameLevel = 0;
+unsigned long homingStart = 0, lastCmdMs = 0, lastTelemetryMs = 0, lastFlameMs = 0;
+float flameLevel = 0;
 String lineBuf;
 
 // ------------------------------------------------------------------ helpers
@@ -238,7 +232,6 @@ void setup() {
     a->stepper.setAcceleration(ACCEL_MM_S2 * a->stepsPerMm);
   }
 
-  dht.begin();
   lastCmdMs = millis();
   Serial.println("LOG ready");
 }
@@ -279,18 +272,12 @@ void loop() {
 
   // 5. sensors
   if (now - lastFlameMs >= FLAME_MS) { lastFlameMs = now; readFlame(); }
-  if (!moving() && now - lastDhtMs >= DHT_MS) {   // DHT read blocks ~25 ms, so only while still
-    lastDhtMs = now;
-    float t = dht.readTemperature(), h = dht.readHumidity();
-    if (!isnan(t)) tempC = t;
-    if (!isnan(h)) humidity = h;
-  }
 
   // 6. telemetry
   if (now - lastTelemetryMs >= TELEMETRY_MS) {
     lastTelemetryMs = now;
-    Serial.printf("T %d %.1f %.1f %.1f %.1f %d %d %d %d\n",
-                  (int)flameLevel, tempC, humidity, posMm(axX), posMm(axY),
+    Serial.printf("T %d %.1f %.1f %d %d %d %d\n",
+                  (int)flameLevel, posMm(axX), posMm(axY),
                   moving() ? 1 : 0, spraying ? 1 : 0, homed() ? 1 : 0, estop ? 1 : 0);
   }
 }

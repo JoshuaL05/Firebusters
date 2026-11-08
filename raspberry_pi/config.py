@@ -80,7 +80,6 @@ MIN_COMMIT_S = 5.0          # ...but only after working on the current one at le
 # ---------------------------------------------------------------------------
 REQUIRE_FLAME_CONFIRM = True   # set False (or --no-flame-confirm) when testing with hot mugs
 FLAME_THRESHOLD = 1500
-FLAME_THRESHOLD_ALERT = 1100   # used when the DHT11 says the room is heating up
 FLAME_OUT_THRESHOLD = 800
 CONFIRM_S = 0.6
 FALSE_POSITIVE_COOLDOWN_S = 30.0
@@ -109,10 +108,3 @@ VERIFY_WAIT_S = 2.0
 MAX_ATTEMPTS = 3
 WARM_SPOT_S = 60.0          # a spot we put out may stay hot (melted wax) for this long;
                             # if it gets checked again with no flame, it's not a "false alarm"
-
-# ---------------------------------------------------------------------------
-# Environment (DHT11)
-# ---------------------------------------------------------------------------
-ENV_BASELINE_S = 10.0
-ENV_TEMP_RISE_C = 3.0
-ENV_HUMIDITY_DROP = 10.0
