@@ -11,6 +11,7 @@ web server and OpenCV's JPEG encoder.
 
 import json
 import logging
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -128,7 +129,9 @@ class WebView:
         self._server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
         self._server.daemon_threads = True
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
-        log.info("Live view: open http://heatseek.local:%d (or http://<pi-ip>:%d)", port, port)
+        host = socket.gethostname()
+        log.info("Live view: on this computer open http://localhost:%d  |  from other devices on the "
+                 "same Wi-Fi: http://%s.local:%d (or this computer's IP)", port, host.lower(), port)
 
     def update(self, frame_bgr, status):
         ok, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
