@@ -82,7 +82,7 @@ class Alerter:
         self.last_activity = 0.0
         self.status = "standby" if enabled else "dry run"
         if enabled:
-            missing = [k for k in ("sid", "token", "from", "to") if not self.secrets[k]]
+            missing = [k for k in ("sid", "token", "to") if not self.secrets[k]]   # "from" is optional
             if missing:
                 raise RuntimeError(
                     f"--call needs Twilio details ({', '.join(missing)} missing). "
@@ -135,27 +135,53 @@ class Alerter:
         self.status = "calling..."
         threading.Thread(target=self._call, args=(message,), daemon=True).start()
 
-    def _call(self, message):
+    def _attempts(self, message):
+        """Call requests to try, fullest first. Twilio trial accounts only accept a few
+        parameters, so we fall back step by step. A rejected request never connects,
+        so it costs no minutes. The message itself ends with <Hangup/>, so the call
+        stays short even when TimeLimit isn't allowed."""
         s = self.secrets
         twiml = (f'<Response><Say voice="alice">{escape(message)}</Say>'
                  f'<Say voice="alice">Repeat. {escape(message)}</Say><Hangup/></Response>')
+        base = {"To": s["to"], "Twiml": twiml}
+        if s["from"]:
+            base["From"] = s["from"]
+        yield "full", {**base, "TimeLimit": str(cfg.CALL_TIME_LIMIT_S)}
+        yield "no time limit", dict(base)
+        if "From" in base:
+            yield "no From", {k: v for k, v in base.items() if k != "From"}
+        # Last resort: Twilio's own trial text-to-speech template (generic message, but it rings).
+        yield "trial template", {"To": s["to"],
+                                 "Url": "https://webhooks.twilio.com/v1/Voice/Template/voice_text_to_speech"}
+
+    def _call(self, message):
+        s = self.secrets
         url = f"https://api.twilio.com/2010-04-01/Accounts/{s['sid']}/Calls.json"
-        body = urllib.parse.urlencode({
-            "To": s["to"], "From": s["from"], "Twiml": twiml,
-            "TimeLimit": str(cfg.CALL_TIME_LIMIT_S),   # Twilio hangs up after this many seconds, no matter what
-        }).encode()
-        req = urllib.request.Request(url, data=body, method="POST")
         auth = base64.b64encode(f"{s['sid']}:{s['token']}".encode()).decode()
-        req.add_header("Authorization", f"Basic {auth}")
-        try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                sid = json.load(resp).get("sid", "?")
-            log.info("Called %s (Twilio call %s)", self._masked(), sid)
-            self.status = time.strftime("called %H:%M:%S")
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode(errors="ignore")[:300]
-            log.error("Twilio refused the call (%s): %s", e.code, detail)
-            self.status = "call failed"
-        except Exception as e:
-            log.error("Couldn't reach Twilio (is the Pi online?): %s", e)
-            self.status = "call failed"
+        last_error = ""
+        for name, params in self._attempts(message):
+            req = urllib.request.Request(url, data=urllib.parse.urlencode(params).encode(), method="POST")
+            req.add_header("Authorization", f"Basic {auth}")
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    sid = json.load(resp).get("sid", "?")
+                log.info("Called %s (Twilio call %s, request style: %s)", self._masked(), sid, name)
+                if name == "trial template":
+                    log.warning("Trial account only allowed Twilio's template call - you'll hear Twilio's "
+                                "sample message, not ours. Upgrading the account unlocks the custom message.")
+                self.status = time.strftime("called %H:%M:%S")
+                return
+            except urllib.error.HTTPError as e:
+                last_error = f"({e.code}) {e.read().decode(errors='ignore')[:300]}"
+                if e.code in (401, 403):          # bad SID/token: retrying won't help
+                    break
+                if e.code == 400:                 # parameter not allowed / bad number: try simpler
+                    log.info("Twilio rejected request style '%s', trying a simpler one...", name)
+                    continue
+                break
+            except Exception as e:
+                log.error("Couldn't reach Twilio (is this computer online?): %s", e)
+                self.status = "call failed"
+                return
+        log.error("Twilio refused the call %s", last_error)
+        self.status = "call failed"

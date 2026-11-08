@@ -90,6 +90,9 @@ It makes **one call per incident**. An incident starts with the first confirmed 
 been no confirmed fires for `INCIDENT_CLEAR_S` (60 s) in `config.py`. Every fire in between, however many
 and however long, is part of the same incident. It only calls after a fire is *confirmed*, so false positives never call. Without `--call` it just logs what it would say. The Pi needs internet (the hotspot).
 Trial calls play a short Twilio message first; press any key if it asks, then you'll hear the alert.
+Newer Twilio trials only accept a few call settings, so if Twilio rejects a request the code automatically
+retries with fewer settings (no time limit, then no From number). Rejected requests cost no minutes. The log
+says which style worked. `TWILIO_FROM` can be left empty on a trial.
 It refuses to auto-dial emergency numbers.
 
 ## Mounting
