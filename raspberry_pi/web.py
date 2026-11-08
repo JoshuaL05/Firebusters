@@ -41,7 +41,7 @@ PAGE = """<!doctype html>
   .off { color:var(--dim); }
 </style></head>
 <body><main>
-  <h1>🔥 FireBusters: live thermal view</h1>
+  <h1>FireBusters: live thermal view</h1>
   <img class="view" src="/stream" alt="live thermal camera">
   <div class="bar">
     <div class="chip"><b>State</b><span id="state">...</span></div>
