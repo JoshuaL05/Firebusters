@@ -97,6 +97,7 @@ def render(machine):
 
 def web_status(machine):
     tel = machine.hw.telemetry
+    rows, summary = machine.fire_log_view()
     busy = machine.target_id is not None and machine.state.value != "SCAN"
     return {
         "state": machine.state.value,
@@ -107,6 +108,10 @@ def web_status(machine):
         "out": machine.stats["put_out"],
         "false": machine.stats["false_alarms"],
         "alert": machine.alerter.status if machine.alerter else "-",
+        "events": list(machine.events)[-20:],     # spoken by the page (voice narration)
+        "sector": machine.target_sector() if busy else None,
+        "log": rows,
+        "summary": summary,
     }
 
 

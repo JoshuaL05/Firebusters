@@ -67,6 +67,27 @@ with fire boxes, priority labels (P1, P2...), the target ring, the nozzle (X, or
 current state. Works with `--sim` too. (`--show` opens a desktop window instead, but that needs a screen
 plugged into the Pi, so it won't work over SSH.)
 
+## Voice announcements
+
+Open the live view (`--web`) and click **Enable voice**. The page then speaks out loud as things happen,
+using the browser's built-in text-to-speech (free, nothing to install):
+
+> "Heat in sector A 3. Checking." → "Sector A 3 confirmed. Suppressing." → "Sector A 3 out." → "All clear."
+
+False alarms ("Sector C 3, false alarm."), retries, and e-stop are announced too, with a short chime before the
+important ones. Announcements are kept short so the voice never falls behind: filler like "confirmed" is skipped
+if it's been waiting too long, but announcements with a location or an outcome are never skipped. Turning voice on
+mid-fire tells you what's happening right now ("Voice on. Suppressing fire in sector B 2."). Re-checks of known
+spots (leftover warm wax, a known false alarm) stay quiet. Browsers only allow sound after a click, so click the
+button each time you open the page.
+
+## Fire log
+
+The live view has a **Fire log** table: one row per fire with its sector, when it was detected, its live status
+(Checking, Suppressing, Repositioning, Verifying, Retrying, then Out, False alarm, Not put out...), how long until
+spraying started, and how long it took to put out. Above it: total fires put out, average time until spraying, and
+average time to put out. These are good numbers for your pitch.
+
 ## Sectors
 
 The floor area is split into a grid of sectors (A1 to C3 by default), like zones in a real building. Columns are

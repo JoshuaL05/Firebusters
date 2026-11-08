@@ -110,12 +110,13 @@ class Alerter:
             self.status = "standby" if self.enabled else "dry run"
 
     def fire_confirmed(self, sector, active_fires, now=None):
-        """A fire was confirmed in `sector` (e.g. "B2"). Calls only if this starts a NEW incident."""
+        """A fire was confirmed in `sector` (e.g. "B2"). Calls only if this starts a NEW incident.
+        Returns True if it started a new incident."""
         now = time.monotonic() if now is None else now
         self.update(now)                # close the previous incident first if it's been quiet
         self.fire_activity(now)
         if self.incident_active:
-            return                      # same incident, already called
+            return False                # same incident, already called
         self.incident_active = True
         self.incident_count += 1
         log.info("Incident #%d started (sector %s)", self.incident_count, sector)
@@ -131,9 +132,10 @@ class Alerter:
         if not self.enabled:
             log.info("(dry run, use --call to really call) would say: %s", message)
             self.status = time.strftime("would call %H:%M:%S")
-            return
+            return True
         self.status = "calling..."
         threading.Thread(target=self._call, args=(message,), daemon=True).start()
+        return True
 
     def _attempts(self, message):
         """Call requests to try, fullest first. Twilio trial accounts only accept a few
