@@ -51,6 +51,7 @@ PAGE = """<!doctype html>
     <div class="chip"><b>Nozzle (mm)</b><span id="pos">-</span></div>
     <div class="chip"><b>Fires put out</b><span id="out">-</span></div>
     <div class="chip"><b>False alarms</b><span id="false">-</span></div>
+    <div class="chip"><b>Fire dept. call</b><span id="alert">-</span></div>
   </div>
 </main>
 <script>
@@ -59,7 +60,7 @@ async function poll() {
     const s = await (await fetch('/status', {cache:'no-store'})).json();
     const st = document.getElementById('state');
     st.textContent = s.state; st.className = s.state;
-    for (const k of ['fires','target','flame','pos','out','false'])
+    for (const k of ['fires','target','flame','pos','out','false','alert'])
       document.getElementById(k).textContent = s[k];
   } catch (e) {
     const st = document.getElementById('state');

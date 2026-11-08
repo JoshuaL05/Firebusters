@@ -42,6 +42,7 @@ Always on: ESP32 watchdog (spray off and gantry stops if the Pi goes quiet for 1
 | `raspberry_pi/motion.py` | Serial link to the ESP32. |
 | `raspberry_pi/sensor.py` | Parses ESP32 telemetry, flame averaging. |
 | `raspberry_pi/web.py` | Live view in a browser (`--web`): heat map, fire boxes, nozzle, state. |
+| `raspberry_pi/alerts.py` | Phone call (Twilio) when a fire is confirmed (`--call`). |
 | `raspberry_pi/sim.py` | Fake fires + fake gantry for testing without hardware. |
 | `raspberry_pi/calibrate.py` | Camera-to-floor calibration and interactive gantry test. |
 | `esp32/main.cpp` | ESP32 firmware: 2 steppers, homing, trigger servo, sensors, watchdog, e-stop. |
@@ -53,7 +54,7 @@ cd raspberry_pi
 pip install numpy opencv-python
 python main.py --sim --show
 ```
-You'll see the nozzle marker (✕) drive to each fire biggest-first and put out 3 of them. It also rejects
+You'll see the nozzle marker (X) drive to each fire biggest-first and put out 3 of them. It also rejects
 a hot mug as a false positive, ignores a person-temperature blob, and catches a fire that appears ~25 s in.
 
 ## Live view for the demo
@@ -62,9 +63,34 @@ a hot mug as a false positive, ignores a person-temperature blob, and catches a 
 python3 main.py --web          # on the Pi
 ```
 Then open **http://heatseek.local:8080** on any laptop or phone on the same Wi-Fi. You'll see the live heat map
-with fire boxes, priority labels (P1, P2...), the target ring, the nozzle (✕, orange while spraying), and the
+with fire boxes, priority labels (P1, P2...), the target ring, the nozzle (X, orange while spraying), and the
 current state. Works with `--sim` too. (`--show` opens a desktop window instead, but that needs a screen
 plugged into the Pi, so it won't work over SSH.)
+
+## Sectors
+
+The floor area is split into a grid of sectors (A1 to C3 by default), like zones in a real building. Columns are
+letters along x, rows are numbers along y (row 1 is the home side). Sectors are based on real floor positions from
+calibration, so "B2" is always the same patch of floor. They show up on the live view grid, in fire labels, in the
+logs (`FIRE OUT in sector B2`), and in the phone call. Change the grid size with `SECTOR_COLS` / `SECTOR_ROWS`
+in `config.py`, or hide the grid with `SHOW_SECTOR_GRID = False`.
+
+## Phone call when a fire is confirmed
+
+The idea: in a real warehouse it would call the fire department. For the demo it calls your phone.
+
+1. Make a free account at [twilio.com](https://www.twilio.com). Verify your own phone number (trial accounts can
+   only call verified numbers) and get a free Twilio phone number from the console.
+2. On the Pi, copy `raspberry_pi/.env.example` to `raspberry_pi/.env` (`cp .env.example .env`) and fill in your
+   Account SID, Auth Token, Twilio number and your phone, all in `+1...` format (`nano .env` to edit).
+   **`.env` is in `.gitignore`: never commit it, since it holds your password.**
+3. Run `python3 main.py --call` (add `--web` for the live view).
+
+It makes **one call per incident**. An incident starts with the first confirmed fire and ends once there have
+been no confirmed fires for `INCIDENT_CLEAR_S` (60 s) in `config.py`. Every fire in between, however many
+and however long, is part of the same incident. It only calls after a fire is *confirmed*, so false positives never call. Without `--call` it just logs what it would say. The Pi needs internet (the hotspot).
+Trial calls play a short Twilio message first; press any key if it asks, then you'll hear the alert.
+It refuses to auto-dial emergency numbers.
 
 ## Mounting
 

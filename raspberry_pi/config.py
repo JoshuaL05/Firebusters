@@ -59,11 +59,17 @@ AREA_H_CM = 30.0
 CALIBRATION_FILE = os.path.join(HERE, "calibration.json")
 CALIBRATION_POINTS_CM = [(3, 3), (27, 3), (27, 27), (3, 27)]   # tape these spots on the floor
 
-X_TRAVEL_MM = 295.0         # how far the carriage can go from home on each axis (measure!)
-Y_TRAVEL_MM = 230.0
+X_TRAVEL_MM = 300.0         # how far the carriage can go from home on each axis (measure!)
+Y_TRAVEL_MM = 300.0
 HOME_FLOOR_X_CM = 0.0       # floor position directly under the NOZZLE when the gantry is at (0, 0)
 HOME_FLOOR_Y_CM = 0.0       # (measure once after homing; calibrate.py --aim-test helps)
 POS_TOLERANCE_MM = 2.0
+
+# Sectors: the floor area (AREA_W_CM x AREA_H_CM) split into a grid like building zones.
+# Columns are letters along x (A, B, C...), rows are numbers along y (1 = the y=0 / home side).
+SECTOR_COLS = 3
+SECTOR_ROWS = 3
+SHOW_SECTOR_GRID = True     # draw the grid on the live view
 
 PARK_X_MM = 0.0             # where the carriage waits while scanning/verifying
 PARK_Y_MM = 0.0             # (keep it out of the camera's view of the fires)
@@ -92,6 +98,15 @@ MOVE_SETTLE_S = 0.3
 MOVE_TIMEOUT_S = 15.0
 LOST_GRACE_S = 1.5
 REACQUIRE_PX = 60
+
+# ---------------------------------------------------------------------------
+# Phone alert (alerts.py, only calls with --call)
+# ---------------------------------------------------------------------------
+SITE_NAME = "demo warehouse"   # spoken in the call: "a fire has been confirmed in the <SITE_NAME>"
+INCIDENT_CLEAR_S = 60.0        # an incident ends after this long with no confirmed fires;
+                               # all fires during one incident = one call
+CALL_TIME_LIMIT_S = 50         # hard cap on call length. Twilio bills every STARTED minute,
+                               # so staying under 60 s = 1 minute per call
 
 # ---------------------------------------------------------------------------
 # Suppression

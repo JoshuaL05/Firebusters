@@ -32,6 +32,8 @@ def parse_args():
     ap.add_argument("--web-port", type=int, default=8080)
     ap.add_argument("--show", action="store_true", help="live view in a desktop window (needs a screen)")
     ap.add_argument("--no-flame-confirm", action="store_true", help="thermal-only (hot-mug testing)")
+    ap.add_argument("--call", action="store_true",
+                    help="really phone the number in .env when a fire is confirmed")
     ap.add_argument("--port", help="ESP32 serial port, e.g. /dev/ttyUSB0")
     ap.add_argument("--fire-temp", type=float, help=f"fire threshold C (default {cfg.FIRE_TEMP_C})")
     ap.add_argument("--duration", type=float, help="stop after this many seconds")
@@ -64,14 +66,20 @@ def build(args):
     if args.fire_temp is not None:
         params["fire_temp"] = args.fire_temp
     require_flame = cfg.REQUIRE_FLAME_CONFIRM and not args.no_flame_confirm
-    return FireSuppressor(thermal, hw, targeting, require_flame=require_flame, params=params)
+    from alerts import Alerter
+    alerter = Alerter(enabled=args.call)
+    return FireSuppressor(thermal, hw, targeting, require_flame=require_flame, params=params,
+                          alerter=alerter)
 
 
 def render(machine):
     """Heat map with fire boxes, target ring, nozzle marker and state. None until the first frame."""
     if machine.temps_big is None:
         return None
-    img = scanner.draw_overlay(machine.temps_big, machine.tracker.fires)
+    t = machine.targeting
+    grid = t.sector_grid_pixels() if cfg.SHOW_SECTOR_GRID else None
+    img = scanner.draw_overlay(machine.temps_big, machine.tracker.fires, grid=grid,
+                               sector_of=lambda f: t.sector_of_pixel(f.cx, f.cy))
     img = cv2.resize(img, None, fx=2, fy=2, interpolation=cv2.INTER_NEAREST)
     if machine.target_xy and machine.state.value != "SCAN":
         cx, cy = (int(v * 2) for v in machine.target_xy)
@@ -93,11 +101,12 @@ def web_status(machine):
     return {
         "state": machine.state.value,
         "fires": len(machine.tracker.candidates()),
-        "target": f"#{machine.target_id}" if busy else "-",
+        "target": f"#{machine.target_id} in {machine.target_sector()}" if busy else "-",
         "flame": int(tel.flame),
         "pos": f"{tel.x_mm:.0f}, {tel.y_mm:.0f}",
         "out": machine.stats["put_out"],
         "false": machine.stats["false_alarms"],
+        "alert": machine.alerter.status if machine.alerter else "-",
     }
 
 
@@ -124,8 +133,14 @@ def main():
             log.error("Port %d is busy - is another copy of main.py still running (check `tmux attach`)? "
                       "Stop it, or use --web-port 8081. Continuing without the live view.", args.web_port)
 
-    machine = build(args)
-    machine.start()
+    try:
+        machine = build(args)
+        machine.start()
+    except RuntimeError as e:
+        log.error("Can't start: %s", e)
+        if web:
+            web.close()
+        sys.exit(1)
     started = last_status = time.monotonic()
     try:
         while True:

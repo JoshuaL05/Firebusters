@@ -305,8 +305,22 @@ def colorize(temps_big):
     return cv2.applyColorMap((norm * 255).astype(np.uint8), cv2.COLORMAP_INFERNO)
 
 
-def draw_overlay(temps_big, fires):
+def draw_grid(img, lines, labels):
+    """Faint sector grid (lines + names), drawn under the fire boxes."""
+    layer = img.copy()
+    for (x1, y1), (x2, y2) in lines:
+        cv2.line(layer, (int(x1), int(y1)), (int(x2), int(y2)), (255, 255, 255), 1, cv2.LINE_AA)
+    for name, (x, y) in labels:
+        cv2.putText(layer, name, (int(x), int(y)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+    cv2.addWeighted(layer, 0.35, img, 0.65, 0, dst=img)
+
+
+def draw_overlay(temps_big, fires, grid=None, sector_of=None):
+    """Heat map with fire boxes. grid = (lines, labels) to draw a sector grid underneath;
+    sector_of(fire) -> "B2" adds the sector to each fire's label."""
     out = colorize(temps_big)
+    if grid:
+        draw_grid(out, *grid)
     ranked = sorted([f for f in fires if f.confirmed and f.visible], key=preview_score, reverse=True)
     rank_of = {f.id: i + 1 for i, f in enumerate(ranked)}
     for f in fires:
@@ -317,6 +331,8 @@ def draw_overlay(temps_big, fires):
         cv2.rectangle(out, (x, y), (x + w, y + h), color, 1)
         cv2.drawMarker(out, (int(f.cx), int(f.cy)), color, cv2.MARKER_CROSS, 10, 1)
         label = f"#{f.id} {f.max_temp:.0f}C a={int(f.area)} g={f.growth_rate:+.2f}"
+        if sector_of:
+            label = f"{sector_of(f)} " + label
         if f.id in rank_of:
             label = f"P{rank_of[f.id]} " + label
         (tw, _), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)
@@ -357,7 +373,7 @@ def run(args):
         print(f"Using saved frame {args.frame}")
     else:
         source = (SimulatedThermal() if args.sim
-                else ThermalCamera(args.hz, args.flip_h or FLIP_H, args.flip_v or FLIP_V))
+                  else ThermalCamera(args.hz, args.flip_h or FLIP_H, args.flip_v or FLIP_V))
         print(f"Using {source.source}")
 
     tracker = FireTracker()

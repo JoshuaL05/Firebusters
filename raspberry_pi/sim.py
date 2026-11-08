@@ -150,8 +150,8 @@ class SimESP32:
         w = self.world
         moving = abs(w.x_mm - w.tx_mm) > 0.5 or abs(w.y_mm - w.ty_mm) > 0.5
         return Telemetry(flame=w.flame_reading(), x_mm=w.x_mm, y_mm=w.y_mm, moving=moving,
-                        spraying=w.spraying, homed=w.homed, estop=w.estop,
-                        stamp=time.monotonic())
+                         spraying=w.spraying, homed=w.homed, estop=w.estop,
+                         stamp=time.monotonic())
 
     def ping(self):
         return True
