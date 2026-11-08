@@ -76,6 +76,9 @@ class FireSuppressor:
         self.stats = {"put_out": 0, "false_alarms": 0, "gave_up": 0}
         self.events = deque(maxlen=50)   # spoken announcements for the live view (newest last)
         self._event_id = 0
+        self.fire_log = deque(maxlen=100)  # one entry per fire we went after (for the live view)
+        self._log_entry = None             # the entry for the fire we're working on right now
+        self._log_seq = 0
         self._all_clear_pending = False
         self.known_false = []            # (cx, cy, until): spots already announced as false alarms
 
@@ -94,7 +97,7 @@ class FireSuppressor:
         if not self.targeting.calibrated:
             log.warning("No calibration.json - using rough area mapping. Run calibrate.py for accurate positioning.")
         log.info("Flame confirmation: %s", "ON" if self.require_flame else "OFF (thermal only)")
-        self.announce("Fire Busters online. Scanning for fires.", "info")
+        self.announce("Fire Busters online.", "info")
         self._go(State.SCAN, time.monotonic(), "ready")
 
     def stop(self):
@@ -145,19 +148,22 @@ class FireSuppressor:
         if not cands:
             if self._all_clear_pending and now - self.state_since >= cfg.ALL_CLEAR_S:
                 self._all_clear_pending = False
-                self.announce("All clear. No active fires.", "clear")
+                self.announce("All clear.", "clear")
             return
         ranked = self.targeting.rank(cands, self._gantry_xy())
         log.info("Fires: " + ", ".join(
             f"#{f.id} {self.targeting.sector_of_pixel(f.cx, f.cy)} a={f.area:.0f} "
             f"g={f.growth_rate:+.2f} {f.max_temp:.0f}C" for f in ranked))
+        self._log_finish("Lost track", now)      # in case the previous target vanished mid-way
         self._set_target(ranked[0])
         self.attempts = 0
         self.reaims = 0
         self.confirmed = False
-        # Re-checks of spots we already know about (warm wax, a known false alarm) stay quiet.
+        # Re-checks of spots we already know about (warm wax, a known false alarm) stay quiet
+        # and don't get a log entry.
         if not (self._near_recent_out(now) or self._near(self.known_false, now)):
-            self.announce(f"Heat detected in sector {self._spoken_sector()}. Checking.", "detect")
+            self.announce(f"Heat in sector {self._spoken_sector()}. Checking.", "detect")
+            self._log_start(now)
         self._go(State.MOVE, now, f"target #{ranked[0].id} in sector {self.target_sector()}")
 
     def _move(self, now):
@@ -174,13 +180,17 @@ class FireSuppressor:
         # The carriage can block the camera's view as it arrives, so only give up on a
         # lost target if we haven't confirmed it yet.
         if fire is None and not self.confirmed and now - self.state_since > cfg.LOST_GRACE_S + 3:
+            self._log_finish("Lost track", now)
             self._go(State.SCAN, now, "lost target while moving")
             return
         if self.hw.at(self.plan.x_mm, self.plan.y_mm) and now - self.state_since >= cfg.MOVE_SETTLE_S:
+            if self.confirmed:
+                self._log_update("Suppressing", now)
             self._go(State.SUPPRESS if self.confirmed else State.CONFIRM, now,
                      "back over the fire" if self.confirmed else "")
         elif now - self.state_since > cfg.MOVE_TIMEOUT_S:
             self._block(now, "couldn't reach target")
+            self._log_finish("Couldn't reach", now)
             self._go(State.SCAN, now, "move timeout")
 
     def _confirm(self, now):
@@ -188,7 +198,8 @@ class FireSuppressor:
             return
         if not self.require_flame:
             self.confirmed = True
-            self.announce("Fire confirmed. Suppressing.", "confirm")
+            self.announce(f"Sector {self._spoken_sector()} confirmed. Suppressing.", "confirm")
+            self._log_update("Suppressing", now, confirmed=True)
             self._raise_alert()
             self._go(State.SUPPRESS, now, "confirmed by thermal")
             return
@@ -196,7 +207,8 @@ class FireSuppressor:
         threshold = cfg.FLAME_THRESHOLD
         if level >= threshold:
             self.confirmed = True
-            self.announce("Flame confirmed. Suppressing.", "confirm")
+            self.announce(f"Sector {self._spoken_sector()} confirmed. Suppressing.", "confirm")
+            self._log_update("Suppressing", now, confirmed=True)
             self._raise_alert()
             self._go(State.SUPPRESS, now, f"flame sensor {level:.0f} >= {threshold}")
         else:
@@ -209,8 +221,9 @@ class FireSuppressor:
             else:
                 if not self._near(self.known_false, now):
                     self.stats["false_alarms"] += 1
-                    self.announce(f"False alarm in sector {self._spoken_sector()}. No flame detected.", "false")
+                    self.announce(f"Sector {self._spoken_sector()}, false alarm.", "false")
                     self.known_false.append((*self.target_xy, now + cfg.KNOWN_FALSE_S))
+                self._log_finish("False alarm", now)
                 self._block(now, "false positive")
                 self._go(State.SCAN, now, f"FALSE POSITIVE in sector {self.target_sector()}: hot but no "
                                           f"flame ({level:.0f} < {threshold})")
@@ -247,6 +260,7 @@ class FireSuppressor:
             self.out_since = self.out_since or now
             if now - self.out_since >= cfg.OUT_CONFIRM_S:
                 self._spray(False)
+                self._log_update("Verifying", now)
                 self._go(State.VERIFY, now, "looks out")
                 return
         else:
@@ -269,8 +283,10 @@ class FireSuppressor:
                 best = max(others, key=self.targeting.score)
                 if self.targeting.score(best) > cfg.SWITCH_RATIO * mine:
                     self._spray(False)
+                    self._log_finish("Paused for bigger fire", now)
                     self._set_target(best)
-                    self.announce(f"Larger fire in sector {self._spoken_sector()}. Switching.", "detect")
+                    self.announce(f"Bigger fire, sector {self._spoken_sector()}. Switching.", "detect")
+                    self._log_start(now)
                     self.confirmed = False
                     self.attempts = 0
                     self.reaims = 0
@@ -285,11 +301,13 @@ class FireSuppressor:
                 self.stats["gave_up"] += 1
                 self._block(now, "no progress after re-positioning")
                 log.warning("Can't make progress on this fire - moving on")
-                self.announce(f"Unable to put out the fire in sector {self._spoken_sector()}. Moving on.", "warn")
+                self.announce(f"Can't put out sector {self._spoken_sector()}. Moving on.", "warn")
+                self._log_finish("Not put out", now)
                 self._all_clear_pending = True
                 self._park()
                 self._go(State.SCAN, now, "gave up on fire")
             else:
+                self._log_update("Repositioning", now)
                 self._go(State.MOVE, now, f"no progress, re-position {self.reaims}/{cfg.MAX_REAIMS}")
 
     def _verify(self, now):
@@ -321,13 +339,15 @@ class FireSuppressor:
                 self.stats["gave_up"] += 1
                 self._block(now, "reignites")
                 log.warning("Fire keeps reigniting - moving on")
-                self.announce(f"Fire in sector {self._spoken_sector()} keeps reigniting. Moving on.", "warn")
+                self.announce(f"Sector {self._spoken_sector()} keeps reigniting. Moving on.", "warn")
+                self._log_finish("Keeps reigniting", now)
                 self._all_clear_pending = True
                 self._go(State.SCAN, now, "gave up on fire")
             else:
                 self.confirmed = True
                 self.reaims = 0
-                self.announce(f"Fire in sector {self._spoken_sector()} still burning. Trying again.", "warn")
+                self.announce(f"Sector {self._spoken_sector()} still burning. Retrying.", "warn")
+                self._log_update("Retrying", now)
                 self._go(State.MOVE, now, f"still burning, attempt {self.attempts + 1}/{cfg.MAX_ATTEMPTS}")
             return
         self.stats["put_out"] += 1
@@ -336,8 +356,8 @@ class FireSuppressor:
         if self.target_xy:
             self.recent_out.append((*self.target_xy, now + cfg.WARM_SPOT_S))
         log.info("FIRE OUT in sector %s (total %d)", self.target_sector(), self.stats["put_out"])
-        secs = now - self.target_since
-        self.announce(f"Fire in sector {self._spoken_sector()} is out, in {secs:.0f} seconds.", "out")
+        self.announce(f"Sector {self._spoken_sector()} out.", "out")
+        self._log_finish("Out", now)
         self._all_clear_pending = True
         self.target_id = None
         self._park()
@@ -346,7 +366,7 @@ class FireSuppressor:
     def _estop(self, now):
         self._spray(False)
         if not self.hw.telemetry.estop:
-            self.announce("Emergency stop released. Resuming.", "info")
+            self.announce("Resuming.", "info")
             self._go(State.SCAN, now, "emergency stop released")
 
     # ======================================================================
@@ -374,6 +394,57 @@ class FireSuppressor:
         """"B2" -> "B 2" so text-to-speech reads it as a letter and a number."""
         return " ".join(self.target_sector())
 
+    # ---- fire log (shown on the live view) ----
+    def _log_start(self, now):
+        self._log_seq += 1
+        self._log_entry = {
+            "n": self._log_seq, "sector": self.target_sector(),
+            "detected": time.strftime("%H:%M:%S"), "t0": now,
+            "status": "Checking", "response": None, "duration": None, "active": True,
+        }
+        self.fire_log.append(self._log_entry)
+
+    def _log_update(self, status, now, confirmed=False):
+        e = self._log_entry
+        if e is None:
+            return
+        e["status"] = status
+        if confirmed and e["response"] is None:
+            e["response"] = now - e["t0"]          # detection -> spraying starts
+
+    def _log_finish(self, status, now):
+        e = self._log_entry
+        if e is None:
+            return
+        e["status"] = status
+        e["active"] = False
+        if status == "Out":
+            e["duration"] = now - e["t0"]          # detection -> fire out
+        self._log_entry = None
+
+    def fire_log_view(self, limit=12):
+        """Newest-first rows for the live view, with live elapsed time for the active fire."""
+        now = time.monotonic()
+        rows = []
+        for e in reversed(self.fire_log):
+            rows.append({
+                "n": e["n"], "sector": e["sector"], "detected": e["detected"], "status": e["status"],
+                "active": e["active"],
+                "elapsed": round(now - e["t0"], 1) if e["active"] else None,
+                "response": None if e["response"] is None else round(e["response"], 1),
+                "duration": None if e["duration"] is None else round(e["duration"], 1),
+            })
+            if len(rows) >= limit:
+                break
+        outs = [e for e in self.fire_log if e["duration"] is not None]
+        resp = [e["response"] for e in self.fire_log if e["response"] is not None]
+        summary = {
+            "out": len(outs),
+            "avg_response": round(sum(resp) / len(resp), 1) if resp else None,
+            "avg_duration": round(sum(e["duration"] for e in outs) / len(outs), 1) if outs else None,
+        }
+        return rows, summary
+
     def announce(self, text, kind="info"):
         """Queue a spoken announcement for the live view (voice narration) and log it."""
         self._event_id += 1
@@ -385,7 +456,7 @@ class FireSuppressor:
         if self.alerter and self.plan:
             new_incident = self.alerter.fire_confirmed(self.target_sector(), len(self.tracker.candidates()))
             if new_incident and self.alerter.enabled:
-                self.announce("Alerting the fire department.", "info")
+                self.announce("Calling the fire department.", "info")
 
     def _park(self):
         self.hw.move(cfg.PARK_X_MM, cfg.PARK_Y_MM, wait=False)
