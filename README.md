@@ -1,4 +1,4 @@
-# FireBusters 🔥🧯
+# FireBusters
 
 An overhead thermal camera watches a floor area, finds fires, drives an x, y gantry over
 the biggest (and fastest-growing) one, sprays it, double-checks it's out, then moves to the next.
@@ -8,7 +8,7 @@ the biggest (and fastest-growing) one, sprays it, double-checks it's out, then m
  (fixed to the frame)           (decides)                      (does)  ──► Y stepper (beam, shaft + belts)
                                                                         ──► spray trigger servo
                                                                ◄── flame sensor (on the carriage, pointing down)
-                                                               ◄── DHT11, 2 limit switches, e-stop
+                                                               ◄── 2 limit switches, e-stop
 ```
 
 ## How it decides
@@ -23,11 +23,12 @@ the biggest (and fastest-growing) one, sprays it, double-checks it's out, then m
    No flame means a false positive (a hot mug, a heater). That spot is ignored for 30 s.
 4. **SUPPRESS**: spray while circling slightly over the fire. It keeps going as long as the fire keeps shrinking.
    If it stops making progress for 3 s, it re-positions. It only switches fires if another one gets *much* bigger.
-5. **VERIFY**: spray off, then park out of the camera's view, wait 2 s, and check again. If it's still
-   burning, it retries (3 attempts), then logs a warning and moves on. If it's out, it does a full rescan.
+5. **VERIFY**: spray off, wait 2 s, and ask the flame sensor if any flame is left (the camera can't tell a
+   relit candle from warm wax). If it's still burning, it retries (3 attempts), then logs a warning and
+   moves on. If it's out, it parks and does a full rescan. Warm wax it sees later is recognized as leftover
+   heat, not a false alarm.
 
-Always on: ESP32 watchdog (spray off and gantry stops if the Pi goes quiet for 1 s), e-stop button,
-and a DHT11 room-heating alert that makes confirmation more sensitive.
+Always on: ESP32 watchdog (spray off and gantry stops if the Pi goes quiet for 1 s) and an e-stop button.
 
 ## Files
 
@@ -39,7 +40,8 @@ and a DHT11 room-heating alert that makes confirmation more sensitive.
 | `raspberry_pi/targeting.py` | Priority score, pixel → floor → gantry position. |
 | `raspberry_pi/state_machine.py` | The decision loop above. |
 | `raspberry_pi/motion.py` | Serial link to the ESP32. |
-| `raspberry_pi/sensor.py` | Parses ESP32 telemetry, flame averaging, DHT11 alert. |
+| `raspberry_pi/sensor.py` | Parses ESP32 telemetry, flame averaging. |
+| `raspberry_pi/web.py` | Live view in a browser (`--web`): heat map, fire boxes, nozzle, state. |
 | `raspberry_pi/sim.py` | Fake fires + fake gantry for testing without hardware. |
 | `raspberry_pi/calibrate.py` | Camera-to-floor calibration and interactive gantry test. |
 | `esp32/main.cpp` | ESP32 firmware: 2 steppers, homing, trigger servo, sensors, watchdog, e-stop. |
@@ -53,6 +55,16 @@ python main.py --sim --show
 ```
 You'll see the nozzle marker (✕) drive to each fire biggest-first and put out 3 of them. It also rejects
 a hot mug as a false positive, ignores a person-temperature blob, and catches a fire that appears ~25 s in.
+
+## Live view for the demo
+
+```bash
+python3 main.py --web          # on the Pi
+```
+Then open **http://heatseek.local:8080** on any laptop or phone on the same Wi-Fi. You'll see the live heat map
+with fire boxes, priority labels (P1, P2...), the target ring, the nozzle (✕, orange while spraying), and the
+current state. Works with `--sim` too. (`--show` opens a desktop window instead, but that needs a screen
+plugged into the Pi, so it won't work over SSH.)
 
 ## Mounting
 
@@ -75,7 +87,6 @@ a hot mug as a false positive, ignores a person-temperature blob, and catches a 
 | E-stop button | GPIO 17 → GND | Optional; leave unconnected if you don't have one. |
 | Trigger servo signal | GPIO 21 | Presses the spray bottle. Servo on its own 5 V; **share GND**. Tune `TRIGGER_ON/OFF_DEG`. |
 | Flame sensor AO | GPIO 34 | Power the module from **3.3 V**. |
-| DHT11 data | GPIO 4 | 3.3 V |
 
 A4988s: VMOT from the 3S 18650 pack with a 100 µF cap across VMOT/GND, VDD 3.3 V, MS1–MS3 high (1/16 steps).
 **Set each driver's current limit before connecting its motor.**
@@ -100,7 +111,7 @@ pip install adafruit-circuitpython-mlx90640 adafruit-blinka
 
 ### ESP32
 VS Code + PlatformIO: open the `esp32/` folder → Upload. (Arduino IDE: rename to `esp32.ino`
-and install ESP32Servo, AccelStepper, and DHT sensor library.) Open the serial monitor at 115200 baud
+and install ESP32Servo and AccelStepper.) Open the serial monitor at 115200 baud
 and you should see `LOG ready` followed by `T ...` lines.
 
 ## Bring-up order (test one thing at a time)
