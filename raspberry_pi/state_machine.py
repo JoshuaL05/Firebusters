@@ -41,10 +41,12 @@ def _clamp(v, lo, hi):
 
 
 class FireSuppressor:
-    def __init__(self, thermal, hw, targeting, require_flame=cfg.REQUIRE_FLAME_CONFIRM, params=None):
+    def __init__(self, thermal, hw, targeting, require_flame=cfg.REQUIRE_FLAME_CONFIRM, params=None,
+                 alerter=None):
         self.thermal = thermal
         self.hw = hw
         self.targeting = targeting
+        self.alerter = alerter
         self.require_flame = require_flame
         self.params = params or scanner.default_params()
 
@@ -109,6 +111,12 @@ class FireSuppressor:
         tel = self.hw.telemetry
         self.flame.add(now, tel.flame)
 
+        # Phone alert bookkeeping: working on a confirmed fire keeps the incident open.
+        if self.alerter:
+            if self.confirmed and self.state in (State.MOVE, State.SUPPRESS, State.VERIFY):
+                self.alerter.fire_activity(now)
+            self.alerter.update(now)
+
         if not getattr(self.hw, "connected", True):
             if now - self._last_warn > 2:
                 log.error("No telemetry from ESP32 - pausing")
@@ -131,12 +139,13 @@ class FireSuppressor:
             return
         ranked = self.targeting.rank(cands, self._gantry_xy())
         log.info("Fires: " + ", ".join(
-            f"#{f.id} a={f.area:.0f} g={f.growth_rate:+.2f} {f.max_temp:.0f}C" for f in ranked))
+            f"#{f.id} {self.targeting.sector_of_pixel(f.cx, f.cy)} a={f.area:.0f} "
+            f"g={f.growth_rate:+.2f} {f.max_temp:.0f}C" for f in ranked))
         self._set_target(ranked[0])
         self.attempts = 0
         self.reaims = 0
         self.confirmed = False
-        self._go(State.MOVE, now, f"target #{ranked[0].id}")
+        self._go(State.MOVE, now, f"target #{ranked[0].id} in sector {self.target_sector()}")
 
     def _move(self, now):
         fire = self._locate()
@@ -145,8 +154,8 @@ class FireSuppressor:
             self.plan = self.targeting.plan(cx, cy)
             self.hw.move(self.plan.x_mm, self.plan.y_mm)
             x, y = self.plan.floor_xy
-            log.info("Move: fire at floor (%.1f, %.1f) cm -> gantry (%.0f, %.0f) mm",
-                     x, y, self.plan.x_mm, self.plan.y_mm)
+            log.info("Move: fire in sector %s, floor (%.1f, %.1f) cm -> gantry (%.0f, %.0f) mm",
+                     self.targeting.sector(x, y), x, y, self.plan.x_mm, self.plan.y_mm)
             self._entered = True
 
         # The carriage can block the camera's view as it arrives, so only give up on a
@@ -166,23 +175,27 @@ class FireSuppressor:
             return
         if not self.require_flame:
             self.confirmed = True
+            self._raise_alert()
             self._go(State.SUPPRESS, now, "confirmed by thermal")
             return
         level = self.flame.mean(since=self.state_since)
         threshold = cfg.FLAME_THRESHOLD
         if level >= threshold:
             self.confirmed = True
+            self._raise_alert()
             self._go(State.SUPPRESS, now, f"flame sensor {level:.0f} >= {threshold}")
         else:
             self._park()
             if self._near_recent_out(now):
                 # Melted wax / hot surface left over from a fire we already put out.
                 self._block(now, "leftover heat")
-                self._go(State.SCAN, now, f"just leftover heat from a fire we put out (flame {level:.0f})")
+                self._go(State.SCAN, now, f"sector {self.target_sector()}: just leftover heat from a fire "
+                                          f"we put out (flame {level:.0f})")
             else:
                 self.stats["false_alarms"] += 1
                 self._block(now, "false positive")
-                self._go(State.SCAN, now, f"FALSE POSITIVE: hot but no flame ({level:.0f} < {threshold})")
+                self._go(State.SCAN, now, f"FALSE POSITIVE in sector {self.target_sector()}: hot but no "
+                                          f"flame ({level:.0f} < {threshold})")
 
     def _suppress(self, now):
         fire = self._locate()
@@ -298,7 +311,7 @@ class FireSuppressor:
             self.tracker.forget(self.target_id)
         if self.target_xy:
             self.recent_out.append((*self.target_xy, now + cfg.WARM_SPOT_S))
-        log.info("FIRE OUT (total %d)", self.stats["put_out"])
+        log.info("FIRE OUT in sector %s (total %d)", self.target_sector(), self.stats["put_out"])
         self.target_id = None
         self._park()
         self._go(State.SCAN, now, "fire out - rescanning")
@@ -322,6 +335,17 @@ class FireSuppressor:
         if on != self._spraying:
             self.hw.spray(on)
             self._spraying = on
+
+    def target_sector(self):
+        """Sector name (e.g. "B2") of the current target, or "?" if there isn't one."""
+        if self.target_xy is None:
+            return "?"
+        return self.targeting.sector_of_pixel(*self.target_xy)
+
+    def _raise_alert(self):
+        """Confirmed fire -> phone call (once per incident, see alerts.py)."""
+        if self.alerter and self.plan:
+            self.alerter.fire_confirmed(self.target_sector(), len(self.tracker.candidates()))
 
     def _park(self):
         self.hw.move(cfg.PARK_X_MM, cfg.PARK_Y_MM, wait=False)

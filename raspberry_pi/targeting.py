@@ -77,6 +77,36 @@ class Targeting:
         """Where to drive the gantry for a fire at thermal pixel (cx, cy)."""
         return self.plan_floor(*self.pixel_to_floor(cx, cy))
 
+    # ---- sectors (building-style zones: A1, B2, C3...) -------------------------
+    def sector(self, x, y):
+        """Sector name for floor point (x, y) cm. Points just outside the area snap to the edge sector."""
+        col = int(_clamp(x / cfg.AREA_W_CM * cfg.SECTOR_COLS, 0, cfg.SECTOR_COLS - 1))
+        row = int(_clamp(y / cfg.AREA_H_CM * cfg.SECTOR_ROWS, 0, cfg.SECTOR_ROWS - 1))
+        return f"{chr(ord('A') + col)}{row + 1}"
+
+    def sector_of_pixel(self, cx, cy):
+        return self.sector(*self.pixel_to_floor(cx, cy))
+
+    def sector_grid_pixels(self):
+        """Grid lines and label positions in working-image pixels, for drawing.
+        Returns (lines, labels): lines = [((x1, y1), (x2, y2)), ...], labels = [(name, (x, y)), ...]."""
+        W, H, C, R = cfg.AREA_W_CM, cfg.AREA_H_CM, cfg.SECTOR_COLS, cfg.SECTOR_ROWS
+        lines = []
+        for i in range(C + 1):
+            x = i * W / C
+            lines.append((self.floor_to_pixel(x, 0), self.floor_to_pixel(x, H)))
+        for j in range(R + 1):
+            y = j * H / R
+            lines.append((self.floor_to_pixel(0, y), self.floor_to_pixel(W, y)))
+        labels = []
+        for i in range(C):
+            for j in range(R):
+                # label in the cell's bottom-left corner (as seen in the image), slightly inset,
+                # so it never sits under the state text in the image's top-left
+                lx, ly = (i + 0.06) * W / C, (j + 0.08) * H / R
+                labels.append((self.sector(lx, ly), self.floor_to_pixel(lx, ly)))
+        return lines, labels
+
     # ---- priority ----------------------------------------------------------
     def score(self, fire, gantry_xy=None):
         s = fire.area * (1 + max(fire.growth_rate, 0.0))
