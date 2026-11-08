@@ -19,17 +19,21 @@
  *   - Watchdog: no command (incl. HB heartbeat) for 1 s -> spray off, gantry stops.
  *   - E-stop button (optional, to GND): spray off, gantry stops, commands refused while held.
  *
+ * Board: Adafruit ESP32 Feather V2 (8 MB flash, 2 MB PSRAM). Pin labels printed on the Feather in [ ].
  * Wiring (change the pin numbers below to match yours):
- *   X  A4988 STEP / DIR   GPIO 26 / 27   carriage along the beam (belt)
- *   Y  A4988 STEP / DIR   GPIO 18 / 19   beam front/back (motor + shaft)
- *   Both A4988 EN         GPIO 25        (or tie EN to GND on both drivers)
+ *   X  A4988 STEP / DIR   GPIO 26 [A0] / 27 [27]   carriage along the beam (belt)
+ *   Y  A4988 STEP / DIR   GPIO 4 [A5] / 19 [MO]    beam front/back (motor + shaft)
+ *   Both A4988 EN         GPIO 25 [A1]             (or tie EN to GND on both drivers)
  *        A4988 VMOT: 8-35 V (3S 18650 pack) + 100 uF cap; VDD: 3.3 V; set current limit FIRST.
  *        MS1-MS3 high = 1/16 microstepping (matches STEPS_PER_MM).
- *   X limit switch        GPIO 32        switch between pin and GND, at the x = 0 end
- *   Y limit switch        GPIO 33        switch between pin and GND, at the y = 0 end
- *   E-stop button         GPIO 17        button between pin and GND (leave unconnected if none)
- *   Trigger servo signal  GPIO 21        presses the spray bottle; servo on its own 5 V, shared GND
- *   Flame sensor AO       GPIO 34        on the carriage pointing DOWN; power from 3.3 V
+ *   X limit switch        GPIO 32 [32]   switch between pin and GND, at the x = 0 end
+ *   Y limit switch        GPIO 33 [33]   switch between pin and GND, at the y = 0 end
+ *   E-stop button         GPIO 14 [14]   button between pin and GND (optional)
+ *                         + the Feather's own button (GPIO 38) also works as an e-stop, no wiring needed
+ *   Trigger servo signal  GPIO 21 [MI]   presses the spray bottle; servo on its own 5 V, shared GND
+ *   Flame sensor AO       GPIO 34 [A2]   on the carriage pointing DOWN; power from the Feather's 3V pin
+ *   A4988 VDD + flame VCC: Feather [3V] pin.  All grounds: Feather [GND].
+ * (GPIO 16/17 are used by the Feather's PSRAM and 18 isn't broken out, so they're avoided.)
  */
 
 #include <Arduino.h>
@@ -39,20 +43,21 @@
 // ------------------------------------------------------------------ pins
 const int PIN_X_STEP = 26;
 const int PIN_X_DIR = 27;
-const int PIN_Y_STEP = 18;
+const int PIN_Y_STEP = 4;          // [A5]
 const int PIN_Y_DIR = 19;
 const int PIN_EN = 25;
 const int PIN_X_LIMIT = 32;
 const int PIN_Y_LIMIT = 33;
-const int PIN_ESTOP = 17;
+const int PIN_ESTOP = 14;          // external e-stop button (optional)
+const int PIN_ESTOP_ONBOARD = 38;  // the Feather's built-in button (has its own pull-up)
 const int PIN_TRIGGER = 21;
 const int PIN_FLAME_AO = 34;
 
 // ------------------------------------------------------------------ settings
 const float X_STEPS_PER_MM   = 80.0f;   // GT2 belt + 20T pulley, 200 steps x 1/16 microstepping
 const float Y_STEPS_PER_MM   = 80.0f;   // same if the Y shaft drives GT2 belts with 20T pulleys
-const float X_TRAVEL_MM      = 300.0f;  // match config.py
-const float Y_TRAVEL_MM      = 300.0f;
+const float X_TRAVEL_MM      = 295.0f;  // match config.py
+const float Y_TRAVEL_MM      = 230.0f;
 const bool  X_INVERT_DIR     = false;   // flip if an axis homes AWAY from its limit switch
 const bool  Y_INVERT_DIR     = false;
 const float MAX_SPEED_MM_S   = 100.0f;
@@ -213,6 +218,7 @@ void setup() {
   pinMode(PIN_X_LIMIT, INPUT_PULLUP);
   pinMode(PIN_Y_LIMIT, INPUT_PULLUP);
   pinMode(PIN_ESTOP, INPUT_PULLUP);
+  pinMode(PIN_ESTOP_ONBOARD, INPUT);              // input-only pin, pull-up is on the board
   pinMode(PIN_EN, OUTPUT);
   digitalWrite(PIN_EN, LOW);                      // A4988 enable is active-low
 
@@ -247,7 +253,7 @@ void loop() {
   unsigned long now = millis();
 
   // 2. emergency stop
-  bool pressed = digitalRead(PIN_ESTOP) == LOW;
+  bool pressed = digitalRead(PIN_ESTOP) == LOW || digitalRead(PIN_ESTOP_ONBOARD) == LOW;
   if (pressed && !estop) Serial.println("LOG E-STOP pressed");
   if (!pressed && estop) Serial.println("LOG E-STOP released");
   estop = pressed;
