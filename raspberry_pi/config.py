@@ -59,8 +59,8 @@ AREA_H_CM = 30.0
 CALIBRATION_FILE = os.path.join(HERE, "calibration.json")
 CALIBRATION_POINTS_CM = [(3, 3), (27, 3), (27, 27), (3, 27)]   # tape these spots on the floor
 
-X_TRAVEL_MM = 300.0         # how far the carriage can go from home on each axis (measure!)
-Y_TRAVEL_MM = 300.0
+X_TRAVEL_MM = 295.0         # how far the carriage can go from home on each axis (measure!)
+Y_TRAVEL_MM = 230.0
 HOME_FLOOR_X_CM = 0.0       # floor position directly under the NOZZLE when the gantry is at (0, 0)
 HOME_FLOOR_Y_CM = 0.0       # (measure once after homing; calibrate.py --aim-test helps)
 POS_TOLERANCE_MM = 2.0
@@ -98,6 +98,13 @@ MOVE_SETTLE_S = 0.3
 MOVE_TIMEOUT_S = 15.0
 LOST_GRACE_S = 1.5
 REACQUIRE_PX = 60
+
+# ---------------------------------------------------------------------------
+# Voice announcements (spoken by the live view page in the browser)
+# ---------------------------------------------------------------------------
+ALL_CLEAR_S = 3.0             # say "All clear" after this long with no fires left
+KNOWN_FALSE_S = 300.0         # a spot that was a false alarm is re-checked quietly (and not
+                              # counted again) for this long
 
 # ---------------------------------------------------------------------------
 # Phone alert (alerts.py, only calls with --call)

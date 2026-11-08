@@ -39,9 +39,19 @@ PAGE = """<!doctype html>
   .SUPPRESS, .ESTOP { color:var(--hot); }
   .SCAN { color:var(--ok); }
   .off { color:var(--dim); }
+  .top { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin:4px 0 12px; }
+  .top h1 { margin:0; }
+  button { font:inherit; color:var(--text); background:var(--card); border:1px solid #2c333c;
+           border-radius:8px; padding:8px 14px; cursor:pointer; }
+  button.on { border-color:var(--ok); color:var(--ok); }
+  .say { margin-top:12px; background:var(--card); border-radius:8px; padding:10px 12px; min-height:44px; }
+  .say b { font-size:12px; color:var(--dim); font-weight:500; margin-right:8px; }
 </style></head>
 <body><main>
-  <h1>FireBusters: live thermal view</h1>
+  <div class="top">
+    <h1>FireBusters: live thermal view</h1>
+    <button id="voice" type="button" aria-pressed="false">Enable voice</button>
+  </div>
   <img class="view" src="/stream" alt="live thermal camera">
   <div class="bar">
     <div class="chip"><b>State</b><span id="state">...</span></div>
@@ -53,8 +63,70 @@ PAGE = """<!doctype html>
     <div class="chip"><b>False alarms</b><span id="false">-</span></div>
     <div class="chip"><b>Fire dept. call</b><span id="alert">-</span></div>
   </div>
+  <div class="say" aria-live="polite"><b>Announcement</b><span id="said">-</span></div>
 </main>
 <script>
+// ---- voice narration (browser text-to-speech, free, nothing to install) ----
+// Browsers only allow sound after a click on the page, hence the button.
+let voiceOn = false, lastId = null, audio = null, voice = null;
+const btn = document.getElementById('voice');
+
+function pickVoice() {
+  const vs = speechSynthesis.getVoices();
+  voice = vs.find(v => /^en(-|_)(US|GB|CA)/i.test(v.lang) && /natural|google|samantha|aria|jenny/i.test(v.name))
+       || vs.find(v => /^en/i.test(v.lang)) || null;
+}
+if ('speechSynthesis' in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
+
+function chime() {                       // short two-tone alert before important announcements
+  if (!audio) return;
+  const t = audio.currentTime;
+  [[880, 0], [660, 0.16]].forEach(([f, d]) => {
+    const o = audio.createOscillator(), g = audio.createGain();
+    o.frequency.value = f; o.type = 'sine';
+    g.gain.setValueAtTime(0.0001, t + d);
+    g.gain.exponentialRampToValueAtTime(0.25, t + d + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + d + 0.14);
+    o.connect(g).connect(audio.destination); o.start(t + d); o.stop(t + d + 0.15);
+  });
+}
+
+function speak(text) {
+  if (!('speechSynthesis' in window)) return;
+  const u = new SpeechSynthesisUtterance(text);
+  if (voice) u.voice = voice;
+  u.rate = 1.05;
+  speechSynthesis.speak(u);
+}
+
+btn.addEventListener('click', () => {
+  voiceOn = !voiceOn;
+  btn.textContent = voiceOn ? 'Voice on' : 'Enable voice';
+  btn.classList.toggle('on', voiceOn);
+  btn.setAttribute('aria-pressed', String(voiceOn));
+  if (voiceOn) {
+    try { audio = audio || new (window.AudioContext || window.webkitAudioContext)(); audio.resume(); } catch (e) {}
+    speak('Voice announcements on.');
+  } else if ('speechSynthesis' in window) {
+    speechSynthesis.cancel();
+  }
+});
+
+function handleEvents(events) {
+  if (!events || !events.length) return;
+  const newest = events[events.length - 1].id;
+  if (lastId === null) { lastId = newest; return; }      // don't read out old history on page load
+  for (const e of events) {
+    if (e.id <= lastId) continue;
+    lastId = e.id;
+    document.getElementById('said').textContent = e.text;
+    if (voiceOn) {
+      if (['detect', 'false', 'warn'].includes(e.kind)) chime();
+      speak(e.text);
+    }
+  }
+}
+
 async function poll() {
   try {
     const s = await (await fetch('/status', {cache:'no-store'})).json();
@@ -62,6 +134,7 @@ async function poll() {
     st.textContent = s.state; st.className = s.state;
     for (const k of ['fires','target','flame','pos','out','false','alert'])
       document.getElementById(k).textContent = s[k];
+    handleEvents(s.events);
   } catch (e) {
     const st = document.getElementById('state');
     st.textContent = 'disconnected'; st.className = 'off';

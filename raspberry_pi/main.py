@@ -107,6 +107,7 @@ def web_status(machine):
         "out": machine.stats["put_out"],
         "false": machine.stats["false_alarms"],
         "alert": machine.alerter.status if machine.alerter else "-",
+        "events": list(machine.events)[-20:],     # spoken by the page (voice narration)
     }
 
 
