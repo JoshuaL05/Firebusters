@@ -11,7 +11,7 @@
  * Arduino IDE users: rename this file to esp32.ino inside a folder called esp32/.
  *
  * Serial protocol, 115200 baud, one line per message:
- *   Pi -> ESP32:  PING | HOME | MOVE <x_mm> <y_mm> | SPRAY <0|1> | STOP | HB
+ *   Pi -> ESP32:  PING | HOME | MOVE <x_mm> <y_mm> | SPRAY <0|1> | STOP | HB | SW (wiring check)
  *   ESP32 -> Pi:  PONG | OK <CMD> | ERR <CMD> <reason> | LOG <text>
  *                 T <flame> <x_mm> <y_mm> <moving> <spraying> <homed> <estop>  (every 50 ms)
  *
@@ -19,17 +19,19 @@
  *   - Watchdog: no command (incl. HB heartbeat) for 1 s -> spray off, gantry stops.
  *   - E-stop button (optional, to GND): spray off, gantry stops, commands refused while held.
  *
- * Wiring (change the pin numbers below to match yours):
- *   X  A4988 STEP / DIR   GPIO 26 / 27   carriage along the beam (belt)
- *   Y  A4988 STEP / DIR   GPIO 18 / 19   beam front/back (motor + shaft)
- *   Both A4988 EN         GPIO 25        (or tie EN to GND on both drivers)
- *        A4988 VMOT: 8-35 V (3S 18650 pack) + 100 uF cap; VDD: 3.3 V; set current limit FIRST.
- *        MS1-MS3 high = 1/16 microstepping (matches STEPS_PER_MM).
- *   X limit switch        GPIO 32        switch between pin and GND, at the x = 0 end
- *   Y limit switch        GPIO 33        switch between pin and GND, at the y = 0 end
- *   E-stop button         GPIO 17        button between pin and GND (leave unconnected if none)
- *   Trigger servo signal  GPIO 21        presses the spray bottle; servo on its own 5 V, shared GND
- *   Flame sensor AO       GPIO 34        on the carriage pointing DOWN; power from 3.3 V
+ * Board: Adafruit ESP32 Feather V2. Pin labels printed on the Feather in [ ].
+ * Wiring - matches the team's "Flame Gantry Schematic":
+ *   X  A4988 STEP / DIR   GPIO 26 [A0] / 27 [27]   carriage along the beam (belt)
+ *   Y  A4988 STEP / DIR   GPIO 20 [SCL] / 19 [MO]  beam front/back (motor + shaft)
+ *   Both A4988 EN         GPIO 25 [A1]             10k pull-up R1 to 3V3F (drivers off until we enable)
+ *        A4988 VMOT: +24 V + 100 uF cap; VDD + MS1-MS3: 3V3F (1/16 microstepping); RESET tied to SLEEP.
+ *   X endstop module S    GPIO 32 [32]   lever module (S / - / +) on 3V3F, at the x = 0 end
+ *   Y endstop module S    GPIO 33 [33]   lever module on 3V3F, at the y = 0 end
+ *   E-stop (latching NC)  GPIO 7 [RX]    NC contact to GND: closed = run, open/broken wire = STOP
+ *                         + the Feather's own button (GPIO 38) also works as an e-stop
+ *   Trigger servo signal  GPIO 21 [MI]   SERVO1 on the servo block, powered from 5V_SRV
+ *   Flame sensor AO       GPIO 34 [A2]   on the carriage pointing DOWN; VCC on 3V3F
+ * Type SW in the serial monitor to see the raw endstop / e-stop readings when checking wiring.
  */
 
 #include <Arduino.h>
@@ -37,22 +39,32 @@
 #include <AccelStepper.h>
 
 // ------------------------------------------------------------------ pins
-const int PIN_X_STEP = 13;
+const int PIN_X_STEP = 26;
 const int PIN_X_DIR = 27;
-const int PIN_Y_STEP = 14;
+const int PIN_Y_STEP = 20;         // [SCL]
 const int PIN_Y_DIR = 19;
-const int PIN_EN = 15;
+const int PIN_EN = 25;
 const int PIN_X_LIMIT = 32;
 const int PIN_Y_LIMIT = 33;
-const int PIN_ESTOP = 4;
+const int PIN_ESTOP = 7;           // [RX] latching NC e-stop to GND
+const int PIN_ESTOP_ONBOARD = 38;  // the Feather's built-in button (has its own pull-up)
 const int PIN_TRIGGER = 21;
 const int PIN_FLAME_AO = 34;
+
+// ------------------------------------------------------------------ input logic
+// Endstop modules (S / - / +): most output LOW normally and HIGH when the lever is pressed.
+// If homing stops instantly without moving, or never stops at the switch, flip this.
+// Check with the SW command: press a lever and see which way its reading changes.
+const int  ENDSTOP_HIT_LEVEL = HIGH;
+// E-stop wired as a normally-closed contact to GND: LOW = run, HIGH = stop (or broken wire).
+// No e-stop fitted? Set ESTOP_FITTED to false (or put a jumper from RX to GND).
+const bool ESTOP_FITTED = true;
 
 // ------------------------------------------------------------------ settings
 const float X_STEPS_PER_MM   = 80.0f;   // GT2 belt + 20T pulley, 200 steps x 1/16 microstepping
 const float Y_STEPS_PER_MM   = 80.0f;   // same if the Y shaft drives GT2 belts with 20T pulleys
-const float X_TRAVEL_MM      = 300.0f;  // match config.py
-const float Y_TRAVEL_MM      = 300.0f;
+const float X_TRAVEL_MM      = 295.0f;  // match config.py
+const float Y_TRAVEL_MM      = 230.0f;
 const bool  X_INVERT_DIR     = false;   // flip if an axis homes AWAY from its limit switch
 const bool  Y_INVERT_DIR     = false;
 const float MAX_SPEED_MM_S   = 100.0f;
@@ -177,6 +189,12 @@ void handleCommand(String line) {
     if (on && estop) { reply("ERR", cmd, "estop"); return; }
     setSpray(on);
     reply("OK", cmd);
+  } else if (cmd == "SW") {
+    // raw input readings, for checking endstop / e-stop wiring
+    Serial.printf("LOG SW xend=%d yend=%d (hit=%d)  estop_pin=%d (stop=1)  onboard_btn=%d (pressed=0)\n",
+                  digitalRead(PIN_X_LIMIT), digitalRead(PIN_Y_LIMIT), ENDSTOP_HIT_LEVEL,
+                  digitalRead(PIN_ESTOP), digitalRead(PIN_ESTOP_ONBOARD));
+    reply("OK", cmd);
   } else if (cmd == "STOP") {
     setSpray(false);
     stopAll();
@@ -189,7 +207,7 @@ void handleCommand(String line) {
 // ------------------------------------------------------------------ homing (both axes at once)
 void updateHoming(Axis &a, const char *name) {
   if (!a.homing) return;
-  if (digitalRead(a.limitPin) == LOW) {          // switch pressed: this is 0 mm
+  if (digitalRead(a.limitPin) == ENDSTOP_HIT_LEVEL) {   // lever pressed: this is 0 mm
     a.stepper.setCurrentPosition(0);
     a.stepper.setMaxSpeed(MAX_SPEED_MM_S * a.stepsPerMm);
     a.stepper.moveTo(lround(HOME_BACKOFF_MM * a.stepsPerMm));  // back off the switch
@@ -213,6 +231,7 @@ void setup() {
   pinMode(PIN_X_LIMIT, INPUT_PULLUP);
   pinMode(PIN_Y_LIMIT, INPUT_PULLUP);
   pinMode(PIN_ESTOP, INPUT_PULLUP);
+  pinMode(PIN_ESTOP_ONBOARD, INPUT);              // input-only pin, pull-up is on the board
   pinMode(PIN_EN, OUTPUT);
   digitalWrite(PIN_EN, LOW);                      // A4988 enable is active-low
 
@@ -247,7 +266,8 @@ void loop() {
   unsigned long now = millis();
 
   // 2. emergency stop
-  bool pressed = digitalRead(PIN_ESTOP) == LOW;
+  bool pressed = (ESTOP_FITTED && digitalRead(PIN_ESTOP) == HIGH)   // NC contact opened
+                 || digitalRead(PIN_ESTOP_ONBOARD) == LOW;          // Feather's own button
   if (pressed && !estop) Serial.println("LOG E-STOP pressed");
   if (!pressed && estop) Serial.println("LOG E-STOP released");
   estop = pressed;
