@@ -51,8 +51,8 @@ const int PIN_FLAME_AO = 34;
 // ------------------------------------------------------------------ settings
 const float X_STEPS_PER_MM   = 80.0f;   // GT2 belt + 20T pulley, 200 steps x 1/16 microstepping
 const float Y_STEPS_PER_MM   = 80.0f;   // same if the Y shaft drives GT2 belts with 20T pulleys
-const float X_TRAVEL_MM      = 300.0f;  // match config.py
-const float Y_TRAVEL_MM      = 300.0f;
+const float X_TRAVEL_MM      = 295.0f;  // match config.py
+const float Y_TRAVEL_MM      = 230.0f;
 const bool  X_INVERT_DIR     = false;   // flip if an axis homes AWAY from its limit switch
 const bool  Y_INVERT_DIR     = false;
 const float MAX_SPEED_MM_S   = 100.0f;
