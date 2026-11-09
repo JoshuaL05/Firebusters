@@ -37,14 +37,14 @@
 #include <AccelStepper.h>
 
 // ------------------------------------------------------------------ pins
-const int PIN_X_STEP = 26;
+const int PIN_X_STEP = 13;
 const int PIN_X_DIR = 27;
-const int PIN_Y_STEP = 18;
+const int PIN_Y_STEP = 14;
 const int PIN_Y_DIR = 19;
-const int PIN_EN = 25;
+const int PIN_EN = 15;
 const int PIN_X_LIMIT = 32;
 const int PIN_Y_LIMIT = 33;
-const int PIN_ESTOP = 17;
+const int PIN_ESTOP = 4;
 const int PIN_TRIGGER = 21;
 const int PIN_FLAME_AO = 34;
 

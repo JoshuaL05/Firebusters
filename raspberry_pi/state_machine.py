@@ -43,7 +43,7 @@ def _clamp(v, lo, hi):
 class FireSuppressor:
     def __init__(self, thermal, hw, targeting, require_flame=cfg.REQUIRE_FLAME_CONFIRM, params=None):
         self.thermal = thermal
-        self.hw = hw
+        self.hw = hw # Hardware Link to the ESP32 Linkage.
         self.targeting = targeting
         self.require_flame = require_flame
         self.params = params or scanner.default_params()

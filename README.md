@@ -139,8 +139,3 @@ Useful flags: `--port /dev/ttyUSB0`, `--log-file run.log`, `--show` (needs a scr
 - Rejecting real fires: lower `FLAME_THRESHOLD`. Watch the `flame=` value in the status line while over a flame.
 - Nozzle consistently off to one side: adjust `HOME_FLOOR_X_CM` / `HOME_FLOOR_Y_CM`.
 - Carriage blocks the camera while scanning: move `PARK_X_MM` / `PARK_Y_MM` to a spot out of its view.
-
-## Safety
-
-Test with hot mugs and hand warmers. Use real flames only for the final demo, only if the venue allows it,
-with a real extinguisher and a person standing by. Use a BMS and a fuse on the 18650 pack.
