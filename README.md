@@ -127,16 +127,20 @@ It refuses to auto-dial emergency numbers.
 
 ## Wiring (ESP32)
 
-| Part | ESP32 pin | Notes |
-|---|---|---|
-| X A4988 STEP / DIR | GPIO 26 / 27 | Carriage along the beam (belt). |
-| Y A4988 STEP / DIR | GPIO 18 / 19 | Beam front/back (motor + shaft). |
-| Both A4988 EN | GPIO 25 | Or tie EN to GND. **You need 2 A4988s, one per motor.** |
-| X limit switch | GPIO 32 → GND | |
-| Y limit switch | GPIO 33 → GND | |
-| E-stop button | GPIO 17 → GND | Optional; leave unconnected if you don't have one. |
-| Trigger servo signal | GPIO 21 | Presses the spray bottle. Servo on its own 5 V; **share GND**. Tune `TRIGGER_ON/OFF_DEG`. |
-| Flame sensor AO | GPIO 34 | Power the module from **3.3 V**. |
+Board: **Adafruit ESP32 Feather V2**. "Label" is what's printed next to the pin on the Feather.
+
+| Part | GPIO | Feather label | Notes |
+|---|---|---|---|
+| X A4988 STEP / DIR | 26 / 27 | A0 / 27 | Carriage along the beam (belt). |
+| Y A4988 STEP / DIR | 4 / 19 | A5 / MO | Beam front/back (motor + shaft). |
+| Both A4988 EN | 25 | A1 | Or tie EN to GND. **You need 2 A4988s, one per motor.** |
+| X limit switch | 32 | 32 | Other side of the switch to GND. |
+| Y limit switch | 33 | 33 | Other side of the switch to GND. |
+| E-stop button | 14 | 14 | Optional, other side to GND. The Feather's **own button** also works as an e-stop. |
+| Trigger servo signal | 21 | MI | Servo on its own 5 V; **share GND**. Tune `TRIGGER_ON/OFF_DEG`. |
+| Flame sensor AO | 34 | A2 | Power the module from the Feather's **3V** pin. |
+| A4988 VDD, flame VCC | | 3V | 3.3 V logic power. |
+| All grounds | | GND | Shared with the Pi, drivers, servo supply, motor supply. |
 
 A4988s: VMOT from the 3S 18650 pack with a 100 µF cap across VMOT/GND, VDD 3.3 V, MS1–MS3 high (1/16 steps).
 **Set each driver's current limit before connecting its motor.**
