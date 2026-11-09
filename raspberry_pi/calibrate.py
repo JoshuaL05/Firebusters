@@ -21,6 +21,7 @@ Step 2 (floor -> gantry), needs the ESP32 too:
 
 import argparse
 import json
+import logging
 import time
 
 import cv2
@@ -87,9 +88,13 @@ def aim_test(args):
     t = Targeting()
     hw = ESP32Link(port=args.port)
     try:
-        print("Homing...")
+        print("Homing... (both axes should drive toward their endstops; gives up after 60 s)")
         if not hw.home():
-            print("Gantry didn't home - check the limit switches.")
+            t = hw.telemetry
+            print("Gantry didn't home. Last status: x=%.1f y=%.1f moving=%s homed=%s estop=%s"
+                  % (t.x_mm, t.y_mm, t.moving, t.homed, t.estop))
+            print("  estop=True  -> e-stop is open (or not fitted: set ESTOP_FITTED=false in main.cpp)")
+            print("  nothing moved -> check 24 V, A4988 RESET-SLEEP jumper, current limit, and the SW command")
             return
         print('Type "x y" (floor cm), "g x y" (gantry mm), "spray", or "q".')
         while True:
@@ -112,17 +117,26 @@ def aim_test(args):
             else:
                 plan = t.plan_floor(a, b)
                 gx, gy = plan.x_mm, plan.y_mm
-            hw.move(gx, gy)
+            if not hw.move(gx, gy):
+                print("  ESP32 refused the move (see the warning above: not_homed or estop)")
+                continue
             deadline = time.monotonic() + 20
             while not hw.at(gx, gy) and time.monotonic() < deadline:
                 time.sleep(0.05)
+            tel = hw.telemetry
+            if not hw.at(gx, gy):
+                print(f"  didn't get there: ESP32 thinks it's at ({tel.x_mm:.0f}, {tel.y_mm:.0f}) mm, "
+                      f"moving={tel.moving}")
             fx, fy = t.gantry_to_floor(gx, gy)
             print(f"  gantry ({gx:.0f}, {gy:.0f}) mm  -> nozzle should be over floor ({fx:.1f}, {fy:.1f}) cm")
+            print("  (if the ESP32 reached it but nothing physically moved: motor power / A4988 problem)")
     finally:
         hw.shutdown()
 
 
 if __name__ == "__main__":
+    # show messages from the ESP32 (e.g. "X homed", "homing timeout") while we work
+    logging.basicConfig(level=logging.INFO, format="  %(name)s: %(message)s")
     ap = argparse.ArgumentParser(description="Calibrate camera and aim")
     ap.add_argument("--aim-test", action="store_true", help="interactive aim test (needs ESP32)")
     ap.add_argument("--fire-temp", type=float, default=40.0, help="detection threshold for the hot object")
