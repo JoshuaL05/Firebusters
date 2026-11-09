@@ -58,7 +58,7 @@ const int PIN_FLAME_AO = 34;
 const int  ENDSTOP_HIT_LEVEL = HIGH;
 // E-stop wired as a normally-closed contact to GND: LOW = run, HIGH = stop (or broken wire).
 // No e-stop fitted? Set ESTOP_FITTED to false (or put a jumper from RX to GND).
-const bool ESTOP_FITTED = true;
+const bool ESTOP_FITTED = false;
 
 // ------------------------------------------------------------------ settings
 const float X_STEPS_PER_MM   = 80.0f;   // GT2 belt + 20T pulley, 200 steps x 1/16 microstepping
